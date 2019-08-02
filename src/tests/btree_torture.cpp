@@ -3,71 +3,59 @@
 #include <iostream>
 #include <vector>
 #include <random>
+#include <sstream>
 
-void stl_test()
+void quick_regress(const size_t n_vals, std::ostream & os)
 {
-  std::array<int, 10> a = {1, 3, 5, 7, 9};
-  for(auto i : a)
-    std::cout << i << ", ";
-  std::cout << std::endl;
+  BTree<4> tree;
 
-  for(int i = -3; i < 5; ++i)
+  std::default_random_engine gen{std::random_device{}()};
+
+  std::vector<key_t> vals;
+  vals.resize(n_vals);
+  for(int i = 0; i < size(vals); ++i)
+    vals[i] = i + 1;
+  shuffle(begin(vals), end(vals), gen);
+  for(const auto val : vals)
   {
-    if(i % 2 == 1)
-      continue;
-    auto actual_end = std::begin(a);
-    while(*actual_end++ != 0)
-      continue;
-    const auto where = std::lower_bound(std::begin(a), actual_end, i);
-    std::cout << i << " -> ";
-    if(where == std::end(a))
-    {
-      std::cout << "past end.";
-      *(where - 1) = std::move(i);
-    }
-    else
-    {
-      std::cout << *where;
-      std::move_backward(where, actual_end - 1, actual_end);
-      *where = std::move(i);
-    }
-    std::cout << '\n';
+    tree.insert(val, new key_t{val * val});
+    const auto res = tree.find(val);
+    assert(res != nullptr);
   }
-  for(auto i : a)
-    std::cout << i << ", ";
-  std::cout << std::endl;
+  for(const auto val : vals)
+  {
+    const auto res = tree.find(val);
+    assert(res != nullptr);
+    assert(*res == val * val);
+  }
+  tree.debug_inspect(os);
 }
 
 int main()
 {
-  BTree tree;
+  {
+    std::ostringstream oss;
 
-  std::default_random_engine gen{std::random_device{}()};
-  std::uniform_int_distribution<> rnd(1, 10);
-
-  std::array<key_t, order - 1> vals;
-  for(int i = 0; i < size(vals); ++i)
-    vals[i] = rnd(gen);
+    for(int i = 1; i < 256; ++i)
+    {
+      oss.seekp(0);
+      oss.clear();
+      quick_regress(i, oss);
+      oss << std::ends;
+    }
+  }
+  BTree<4> tree;
+  const std::vector<key_t> vals = {1, 8, 6, 7, 10, 3, 9, 2, 12, 4, 5, 11};
   for(const auto val : vals)
   {
-    tree.insert(val, val * 10);
+    tree.insert(val, new key_t{ val * val });
     const auto res = tree.find(val);
-    if(!res.has_value())
-      __debugbreak();
+    assert(res != nullptr);
   }
-  for(const auto i: vals)
-  {
-    const auto res = tree.find(i);
-    if(res.has_value())
-    {
-      std::cout << i << " -> " << *res << '\n';
-    }
-    else
-    {
-      std::cout << i << " not found\n";
-    }
-  }
-
-  //stl_test();
+  tree.remove(12);
+  tree.debug_inspect(std::cout);
+  tree.remove(11);
+  std::cout << "after deletion:\n";
+  tree.debug_inspect(std::cout);
   return 0;
 }

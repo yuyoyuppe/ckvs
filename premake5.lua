@@ -65,7 +65,10 @@ local function make_common_project_conf(src_path, use_pch)
     warnings "Extra"
     symbols "Off"
     symbols "FastLink"
-    defines { "NDEBUG" }
+    defines
+    {
+      "NDEBUG" -- asserts
+    }
     runtime "Release"
     optimize "On"
 end
