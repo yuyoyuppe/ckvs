@@ -1,16 +1,17 @@
 workspace "ckvs"
 configurations {"Debug", "Release"}
+platforms {"x86", "x64"}
 language "C++"
 system "windows"
-architecture "x86_64"
+
 cppdialect "C++17"
-startproject "tests"
+startproject "property_tests"
 preferredtoolarchitecture "x86_64"
 
 paths = {
-  ClangFormatExecutable = "S:\\VS2017\\Common7\\IDE\\VC\\vcpackages\\clang-format.exe",
   ckvs = "src/ckvs/",
-  tests = "src/tests/",
+  property_tests = "src/property_tests/",
+  perf_tests = "src/perf_tests/",
   build = "build/",
   deps = {
     fmt = "deps/fmt/"
@@ -19,7 +20,7 @@ paths = {
 }
 
 settings = {
-  source_extensions = {".cpp", ".h"}
+  source_extensions = {".cpp", ".hpp"}
 }
 
 location(paths.build)
@@ -32,13 +33,20 @@ newaction {
   end
 }
 
+newoption {
+  trigger     = "clang-format-path",
+  description = "Absolute path to the clang-format.exe. Used by the format action.",
+  default = "S:\\VS2019\\VC\\Tools\\Llvm\\8.0.0\\bin\\clang-format.exe",
+
+}
 newaction {
   trigger = "format",
   description = "Apply .clang-format style to all source files",
   onStart = function()
     for _, src_ext in ipairs(settings.source_extensions) do
       for _, file in ipairs(os.matchfiles(paths.modules .. '**' .. src_ext)) do
-        os.executef('%s -i -style=file -fallback-style=none %s', paths.ClangFormatExecutable, file)
+        print('Formatting ' .. file)
+        os.executef('%s -i -style=file -fallback-style=none %s', _OPTIONS['clang-format-path'], file)
       end
     end
   end
@@ -52,14 +60,24 @@ local function make_common_project_conf(src_path, use_pch)
   flags { "FatalWarnings", "MultiProcessorCompile" }
   includedirs{src_path, paths.build}
   basedir (src_path)
-  targetdir (paths.build .. "bin")
+  targetdir (paths.build .. "bin_%{cfg.architecture}")
   objdir (paths.build .. "obj")
-  files { src_path .. "**.cpp", src_path .. "**.cc", src_path .. "**.h" }
+  for _, src_ext in ipairs(settings.source_extensions) do
+    files { src_path .. "**" .. src_ext}
+  end
   linkoptions { "-IGNORE:4221" }
+  filter "platforms:x86"
+    architecture "x86"
+  filter "platforms:x64"
+    architecture "x86_64"
   filter "configurations:Debug"
     symbols "On"
     runtime "Debug"
-    defines { "DEBUG" }
+    defines 
+    { 
+      "DEBUG",
+      -- "VERBOSE_TEST"
+    }
     targetsuffix "_d"
   filter "configurations:Release"
     warnings "Extra"
@@ -67,10 +85,17 @@ local function make_common_project_conf(src_path, use_pch)
     symbols "FastLink"
     defines
     {
-      "NDEBUG" -- asserts
+      "NDEBUG"
     }
     runtime "Release"
     optimize "On"
+  
+  filter {}
+    defines
+    {
+      "ASSERTS"
+    }
+
 end
 
 project "ckvs"
@@ -83,10 +108,10 @@ project "ckvs"
   }
   make_common_project_conf(paths.ckvs)
 
-  project "tests"
+  project "property_tests"
     kind "ConsoleApp"
     links { "ckvs" }
     defines {  }
     includedirs {paths.ckvs}
-    make_common_project_conf(paths.tests)
+    make_common_project_conf(paths.property_tests)
 
