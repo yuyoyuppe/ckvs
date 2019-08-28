@@ -37,12 +37,13 @@ class bp_tree : Extensions<detail::node<Config>>
 {
   using config = Config;
 
-  using index_t    = typename config::index_t;
-  using key_t      = typename config::key_t;
-  using payload_t  = typename config::payload_t;
-  using node_t     = detail::node<config>;
-  using slot_t     = typename node_t::slot_t;
-  using extensions = Extensions<node_t>;
+  using index_t       = typename config::index_t;
+  using key_t         = typename config::key_t;
+  using payload_t     = typename config::payload_t;
+  using node_t        = detail::node<config>;
+  using slot_t        = typename node_t::slot_t;
+  using extensions    = Extensions<node_t>;
+  using node_handle_t = typename extensions::node_handle_t;
 
   static constexpr size_t  order         = config::order;
   static constexpr index_t node_max_keys = config::node_max_keys;
@@ -50,7 +51,7 @@ class bp_tree : Extensions<detail::node<Config>>
   static_assert(std::is_trivially_copyable_v<node_t>, "nodes should be serializable!");
 
 
-  std::unique_ptr<node_t> _root;
+  node_handle_t _root = extensions::invalid_node_handle;
 
 
   using parents_trace_t = std::array<node_t *, config::upper_bound_leaf_level>;
@@ -79,7 +80,7 @@ class bp_tree : Extensions<detail::node<Config>>
 
   std::tuple<node_t *, index_t, root_to_leaf_path> find_insertion_point(const key_t key) const noexcept
   {
-    node_t *          node = _root.get();
+    node_t *          node = _root;
     index_t           leaf_idx;
     root_to_leaf_path path{};
     size_t            path_depth = 0;
@@ -109,15 +110,13 @@ class bp_tree : Extensions<detail::node<Config>>
   {
     if(node->is_root())
     {
-      const node_handle_t new_root = new_node(detail::node_kind::Root);
-      new_root->_keys[0]           = key;
-      new_root->_nKeys             = 1;
-      new_root->_slots[0]          = node;
-      new_root->_slots[1]          = new_neighbor;
+      const auto new_root = new_node(detail::node_kind::Root);
+      new_root->_keys[0]  = key;
+      new_root->_nKeys    = 1;
+      new_root->_slots[0] = node;
+      new_root->_slots[1] = new_neighbor;
 
-      _root.release(); // doesn't destruct the value
-      _root.reset(new_root);
-
+      _root       = new_root;
       node->_kind = node->has_links() ? detail::node_kind::Internal : detail::node_kind::Leaf;
     }
     else
@@ -170,9 +169,9 @@ class bp_tree : Extensions<detail::node<Config>>
     // Only one child left in root => it becomes the new root
     if(node->is_root() && node->has_links() && node->_nKeys == 0u)
     {
-      _root.reset(node->_slots[0]._child == value._child ? node->_slots[1]._child : node->_slots[0]._child);
+      _root        = node->_slots[0]._child == value._child ? node->_slots[1]._child : node->_slots[0]._child;
       _root->_kind = _root->has_links() ? detail::node_kind::Root : detail::node_kind::RootLeaf;
-      //delete node; // unique_ptr handles this for now
+      delete_node(node);
       return;
     }
 
@@ -230,14 +229,30 @@ public:
   bp_tree(const bp_tree &) = delete;
   bp_tree & operator=(const bp_tree &) = delete;
 
-  bp_tree(bp_tree &&) = default;
-  bp_tree & operator=(bp_tree &&) = default;
+  bp_tree(bp_tree && rhs) noexcept
+  {
+    _root     = std::move(rhs._root);
+    rhs._root = extensions::invalid_node_handle;
+  }
+  bp_tree & operator=(bp_tree && rhs) noexcept
+  {
+    delete_node(_root);
+    _root     = std::move(rhs._root);
+    rhs._root = extensions::invalid_node_handle;
+    return *this;
+  }
+
+  ~bp_tree()
+  {
+    if(_root != invalid_node_handle)
+      delete_node(_root);
+  }
 
   void inspect(std::ostream & os) const noexcept
   {
     uint64_t             lvl = 0;
     std::queue<node_t *> bfs;
-    bfs.push(_root.get());
+    bfs.push(_root);
     uint64_t nodes_left_on_cur_lvl = 1;
     uint64_t nodes_left_on_nxt_lvl = 0;
     CKVS_ASSERT(_root->is_root());
@@ -304,9 +319,10 @@ public:
   }
 
   template <typename... ExtensionsCtorParams>
-  bp_tree(ExtensionsCtorParams &&... ext_params) : extensions{std::forward<ExtensionsCtorParams>(ext_params)...}
+  bp_tree(ExtensionsCtorParams &&... ext_params) noexcept
+    : extensions{std::forward<ExtensionsCtorParams>(ext_params)...}
   {
-    _root         = std::make_unique<node_t>(detail::node_kind::RootLeaf);
+    _root         = new_node(detail::node_kind::RootLeaf);
     _root->_nKeys = 0;
   }
 

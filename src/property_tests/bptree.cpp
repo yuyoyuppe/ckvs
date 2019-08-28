@@ -16,7 +16,10 @@ struct bp_tree_no_extensions
 {
   using node_t        = NodeT;
   using node_handle_t = NodeT *;
-  using key_t         = typename node_t::key_t;
+
+  static inline const node_handle_t invalid_node_handle = nullptr;
+
+  using key_t = typename node_t::key_t;
 
   inline node_t & get_node_from_handle_unsafe(const node_handle_t handle) { return *handle; }
 
@@ -49,7 +52,9 @@ void bp_tree_test(const size_t iteration, std::default_random_engine & gen, std:
   using payload_t = uint32_t;
 
   tree_variant_t var_tree;
+
   utils::default_init_variant(var_tree, gen() % std::variant_size_v<tree_variant_t>);
+
   std::visit(
     [&](auto & tree) {
       std::vector<key_t> vals;
@@ -60,6 +65,7 @@ void bp_tree_test(const size_t iteration, std::default_random_engine & gen, std:
       for(const auto val : vals)
         os << val << ',';
       os << '\n';
+
       shuffle(begin(vals), end(vals), gen);
       for(const auto val : vals)
       {
@@ -75,6 +81,7 @@ void bp_tree_test(const size_t iteration, std::default_random_engine & gen, std:
         CKVS_ASSERT(res != std::nullopt);
         CKVS_ASSERT(*res == val * val);
       }
+
       shuffle(begin(vals), end(vals), gen);
       for(const auto val : vals)
         os << val << ',';

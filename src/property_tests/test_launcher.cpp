@@ -14,12 +14,27 @@ struct test_run_params
   size_t             _nIterations;
 };
 
-const test_run_params tests[] = {{bp_tree_test, 40}, {slotted_page_test, 3000}, {lockfree_pool_test, 1000}};
+const bool dbg =
+#if defined(DEBUG)
+  true;
+#
+#else
+  false;
+#endif
+
+const test_run_params tests[] = {
+  {bp_tree_test, dbg ? 30 : 40},
+  {slotted_page_test, dbg ? 500 : 3000},
+  {lockfree_pool_test, dbg ? 30 : 1000}
+};
 
 using namespace ckvs;
 
+
 int main(int argc, char ** argv)
 {
+  leak_reporter leaks_scope;
+
   uint32_t seed = 0;
   if(argc >= 2)
     std::istringstream(argv[1]) >> seed;
@@ -33,14 +48,14 @@ int main(int argc, char ** argv)
 #else
     std::cout;
 #endif
-
+  
   std::default_random_engine gen{seed};
   std::cout << "Launching property-based testing, seed: " << seed << "\n";
   size_t i = 0;
   for(auto [test, iters] : tests)
   {
     std::cout << "Running test #" << i++ << " ...";
-    const double total_time_sec = utils::profiled([&, test = test, iters = iters] {
+    const double total_time_sec = utils::profiled([&, test = std::move(test), iters = std::move(iters)] {
       for(size_t iter = 1; iter < iters; ++iter)
         test(iter, gen, os);
     });

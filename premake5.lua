@@ -93,7 +93,8 @@ local function make_common_project_conf(src_path, use_pch)
   filter {}
     defines
     {
-      "ASSERTS"
+      "ASSERTS",
+      "CHECK_LEAKS"
     }
 
 end
