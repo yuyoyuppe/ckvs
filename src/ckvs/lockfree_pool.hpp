@@ -40,7 +40,7 @@ public:
   }
   ~lockfree_pool() noexcept {}
 
-  T * allocate() noexcept
+  T * acquire() noexcept
   {
     chunk_t * chunk = nullptr;
     if(!_dispenser.pop(chunk))
@@ -51,7 +51,7 @@ public:
     return result;
   }
 
-  void deallocate(T * p) noexcept
+  void release(T * p) noexcept
   {
     p->~T();
     auto chunk = reinterpret_cast<chunk_t *>(p);

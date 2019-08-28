@@ -10,12 +10,38 @@ using namespace ckvs;
 using key_t     = uint32_t;
 using payload_t = uint32_t;
 
-using tree_variant_t = std::variant<bp_tree<bp_tree_config<key_t, payload_t, 4>>,
-                                    bp_tree<bp_tree_config<key_t, payload_t, 6>>,
-                                    bp_tree<bp_tree_config<key_t, payload_t, 34>>,
-                                    bp_tree<bp_tree_config<key_t, payload_t, 70>>,
-                                    bp_tree<bp_tree_config<key_t, payload_t, 128>>,
-                                    bp_tree<bp_tree_config<key_t, payload_t, 1024>>>;
+
+template <typename NodeT>
+struct bp_tree_no_extensions
+{
+  using node_t        = NodeT;
+  using node_handle_t = NodeT *;
+  using key_t         = typename node_t::key_t;
+
+  inline node_t & get_node_from_handle_unsafe(const node_handle_t handle) { return *handle; }
+
+  inline node_t & get_node_from_handle(const node_handle_t handle) { return get_node_from_handle_unsafe(handle); }
+
+  inline void delete_node(const node_handle_t n) noexcept
+  {
+    static_assert(noexcept(std::declval<node_t>().~node_t()));
+    delete n;
+  }
+
+  template <typename... NodeCtorParams>
+  inline node_handle_t new_node(NodeCtorParams &&... params) noexcept
+  {
+    static_assert(noexcept(node_t(std::forward<NodeCtorParams>(params)...)));
+    return new node_t{std::forward<NodeCtorParams>(params)...};
+  }
+};
+
+using tree_variant_t = std::variant<bp_tree<bp_tree_config<key_t, payload_t, 4>, bp_tree_no_extensions>,
+                                    bp_tree<bp_tree_config<key_t, payload_t, 6>, bp_tree_no_extensions>,
+                                    bp_tree<bp_tree_config<key_t, payload_t, 34>, bp_tree_no_extensions>,
+                                    bp_tree<bp_tree_config<key_t, payload_t, 70>, bp_tree_no_extensions>,
+                                    bp_tree<bp_tree_config<key_t, payload_t, 128>, bp_tree_no_extensions>,
+                                    bp_tree<bp_tree_config<key_t, payload_t, 1024>, bp_tree_no_extensions>>;
 
 void bp_tree_test(const size_t iteration, std::default_random_engine & gen, std::ostream & os)
 {

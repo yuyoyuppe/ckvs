@@ -32,23 +32,28 @@ struct bp_tree_config
     static_cast<size_t>(utils::ceil(utils::approx_log(node_max_keys, tree_max_capacity)));
 };
 
-template <typename Config>
-class bp_tree
+template <typename Config, template <typename...> typename Extensions>
+class bp_tree : Extensions<detail::node<Config>>
 {
   using config = Config;
-  using index_t   = typename config::index_t;
-  using key_t     = typename config::key_t;
-  using payload_t = typename config::payload_t;
-  using node_t    = detail::node<config>;
-  using slot_t    = typename node_t::slot_t;
 
-  static constexpr size_t order = config::order;
+  using index_t    = typename config::index_t;
+  using key_t      = typename config::key_t;
+  using payload_t  = typename config::payload_t;
+  using node_t     = detail::node<config>;
+  using slot_t     = typename node_t::slot_t;
+  using extensions = Extensions<node_t>;
+
+  static constexpr size_t  order         = config::order;
+  static constexpr index_t node_max_keys = config::node_max_keys;
 
   static_assert(std::is_trivially_copyable_v<node_t>, "nodes should be serializable!");
 
-  using parents_trace_t = std::array<node_t *, config::upper_bound_leaf_level>;
 
   std::unique_ptr<node_t> _root;
+
+
+  using parents_trace_t = std::array<node_t *, config::upper_bound_leaf_level>;
 
   struct root_to_leaf_path
   {
@@ -100,15 +105,15 @@ class bp_tree
     return {node, leaf_idx, path};
   }
 
-  void insert_in_parent(node_t * node, const parents_trace trace, const key_t key, node_t * new_node) noexcept
+  void insert_in_parent(node_t * node, const parents_trace trace, const key_t key, node_t * new_neighbor) noexcept
   {
     if(node->is_root())
     {
-      const auto new_root = new node_t{detail::node_kind::Root};
-      new_root->_keys[0]  = key;
-      new_root->_nKeys    = 1;
-      new_root->_slots[0] = node;
-      new_root->_slots[1] = new_node;
+      const node_handle_t new_root = new_node(detail::node_kind::Root);
+      new_root->_keys[0]           = key;
+      new_root->_nKeys             = 1;
+      new_root->_slots[0]          = node;
+      new_root->_slots[1]          = new_neighbor;
 
       _root.release(); // doesn't destruct the value
       _root.reset(new_root);
@@ -119,9 +124,9 @@ class bp_tree
     {
       const auto parent = trace._parents[trace._parent_index];
       CKVS_ASSERT(parent != nullptr);
-      if(parent->_nKeys != config::node_max_keys)
+      if(parent->_nKeys != node_max_keys)
       {
-        parent->insert(key, slot_t{new_node});
+        parent->insert(key, slot_t{new_neighbor});
         return;
       }
 
@@ -129,7 +134,7 @@ class bp_tree
       const auto new_parent = new node_t{detail::node_kind::Internal};
       new_parent->_nKeys    = 0;
 
-      const key_t sparse_key = parent->distribute_children(new_parent, parent->find_key_index(key), key, new_node);
+      const key_t sparse_key = parent->distribute_children(new_parent, parent->find_key_index(key), key, new_neighbor);
       insert_in_parent(parent, next_parent_from_trace(trace, parent->is_root()), sparse_key, new_parent);
     }
   }
@@ -200,7 +205,7 @@ class bp_tree
       neighbor->drain_from(node);
 
       remove_entry(parent, next_parent_from_trace(trace, parent->is_root()), parent_key, slot_t{node}, parent_idx);
-      delete node;
+      delete_node(node);
       return;
     }
 
@@ -240,7 +245,7 @@ public:
     uint64_t non_leaf_count = 0;
     uint64_t leaf_count     = 0;
 
-    const node_t * next_sibling = nullptr;
+    const node_t * next_neighbor = nullptr;
     while(!bfs.empty())
     {
       node_t * const node = bfs.front();
@@ -252,7 +257,7 @@ public:
         ++non_leaf_count;
       else
         ++leaf_count;
-      for(index_t i = 0; i < config::node_max_keys; ++i)
+      for(index_t i = 0; i < node_max_keys; ++i)
       {
         const bool nonempty = i < node->_nKeys;
         os << '|';
@@ -272,9 +277,9 @@ public:
         }
         if(!node->is_root())
         {
-          CKVS_ASSERT(next_sibling == node || !nodes_left_on_nxt_lvl);
+          CKVS_ASSERT(next_neighbor == node || !nodes_left_on_nxt_lvl);
           ++nodes_left_on_nxt_lvl; // correct triggering assert on the line above
-          next_sibling = node->next_sibling();
+          next_neighbor = node->next_sibling();
         }
         os << '\n';
       }
@@ -289,7 +294,7 @@ public:
       {
         ++lvl;
         std::swap(nodes_left_on_nxt_lvl, nodes_left_on_cur_lvl);
-        next_sibling = nullptr;
+        next_neighbor = nullptr;
       }
     }
     const uint64_t total = non_leaf_count + leaf_count;
@@ -298,7 +303,8 @@ public:
     CKVS_ASSERT(lvl < config::upper_bound_leaf_level);
   }
 
-  bp_tree()
+  template <typename... ExtensionsCtorParams>
+  bp_tree(ExtensionsCtorParams &&... ext_params) : extensions{std::forward<ExtensionsCtorParams>(ext_params)...}
   {
     _root         = std::make_unique<node_t>(detail::node_kind::RootLeaf);
     _root->_nKeys = 0;
@@ -309,23 +315,23 @@ public:
     const auto [node, idx, path] = find_insertion_point(key);
     CKVS_ASSERT(node != nullptr);
     CKVS_ASSERT(!node->has_links());
-    if(node->_nKeys != config::node_max_keys)
+    if(node->_nKeys != node_max_keys)
     {
       node->insert_hinted(key, slot_t{payload}, idx, idx);
       return;
     }
 
-    const auto new_node = new node_t{detail::node_kind::Leaf};
-    new_node->_nKeys    = 0;
+    const node_handle_t new_neighbor = new_node(detail::node_kind::Leaf);
+    new_neighbor->_nKeys             = 0;
 
-    node->distribute_payload(new_node, idx, key, payload);
+    node->distribute_payload(new_neighbor, idx, key, payload);
 
-    new_node->_slots[config::node_max_keys] = node->_slots[config::node_max_keys];
-    node->_slots[config::node_max_keys]     = new_node;
+    new_neighbor->_slots[node_max_keys] = node->_slots[node_max_keys];
+    node->_slots[node_max_keys]         = new_neighbor;
 
-    const key_t sparse_key = new_node->_keys[0];
+    const key_t sparse_key = new_neighbor->_keys[0];
 
-    insert_in_parent(node, trace_from_path(path), sparse_key, new_node);
+    insert_in_parent(node, trace_from_path(path), sparse_key, new_neighbor);
   }
 
   void remove(const key_t key) noexcept

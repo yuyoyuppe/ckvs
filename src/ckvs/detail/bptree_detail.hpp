@@ -52,7 +52,7 @@ struct node
   key_t     _keys[order - 1];
   slot_t    _slots[order];
 
-  node(const node_kind kind) : _kind(kind) {}
+  node(const node_kind kind) noexcept : _kind(kind) {}
 
   bool has_links() const noexcept { return _kind < node_kind::Leaf; }
 

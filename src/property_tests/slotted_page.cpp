@@ -12,6 +12,8 @@
 using namespace ckvs;
 using namespace utils;
 
+
+// todo: move to config
 constexpr size_t page_size         = 1024;
 constexpr size_t max_bin_slot_size = 512;
 constexpr size_t max_variants      = 256;

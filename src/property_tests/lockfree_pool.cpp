@@ -23,17 +23,17 @@ void lockfree_pool_test(const size_t iteration, std::default_random_engine & gen
 
     for(size_t i = 0; i < nPages; ++i)
     {
-      elems[i] = pool.allocate();
+      elems[i] = pool.acquire();
       CKVS_ASSERT(elems[i] != nullptr);
     }
-    CKVS_ASSERT(pool.allocate() == nullptr);
+    CKVS_ASSERT(pool.acquire() == nullptr);
 
     for(size_t i = 0; i < nPages; ++i)
-      pool.deallocate(elems[i]);
+      pool.release(elems[i]);
 
     for(size_t i = 0; i < nPages; ++i)
     {
-      elems[i] = pool.allocate();
+      elems[i] = pool.acquire();
       CKVS_ASSERT(elems[i] != nullptr);
     }
   }
@@ -52,8 +52,8 @@ void lockfree_pool_test(const size_t iteration, std::default_random_engine & gen
     threads.emplace_back([&elem_ranges, &pool, i] {
       for(auto it = elem_ranges[i].first; it != elem_ranges[i].second; ++it)
       {
-        *it = pool.allocate();
-        pool.deallocate(*it);
+        *it = pool.acquire();
+        pool.release(*it);
       }
     });
   }
@@ -62,10 +62,10 @@ void lockfree_pool_test(const size_t iteration, std::default_random_engine & gen
 
   for(size_t i = 0; i < nPages; ++i)
   {
-    elems[i] = pool.allocate();
+    elems[i] = pool.acquire();
     CKVS_ASSERT(elems[i] != nullptr);
   }
 
   for(size_t i = 0; i < nPages; ++i)
-    pool.deallocate(elems[i]);
+    pool.release(elems[i]);
 }
