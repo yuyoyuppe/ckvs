@@ -10,7 +10,7 @@ namespace ckvs {
 
 // todo: use smallest possible sizes for description when the rest is stabilized
 template <uint16_t size>
-class SlottedPage
+class slotted_storage
 {
   struct slot_description_t
   {
@@ -46,13 +46,13 @@ private:
 
   uint8_t _storage[storage_size];
 
-  slot_description_t & slot_description(const slot_id_t slot_id) noexcept
+  slot_description_t & locate_slot_description(const slot_id_t slot_id) noexcept
   {
     return reinterpret_cast<slot_description_t *>(_storage)[slot_id];
   }
-  const slot_description_t & slot_description(const slot_id_t slot_id) const noexcept
+  const slot_description_t & locate_slot_description(const slot_id_t slot_id) const noexcept
   {
-    return const_cast<SlottedPage *>(this)->slot_description(slot_id);
+    return const_cast<slotted_storage *>(this)->locate_slot_description(slot_id);
   }
 
   uint16_t free_space() const noexcept
@@ -69,14 +69,14 @@ private:
 
   const span_t::value_type * slot_ptr(const slot_description_t desc) const noexcept
   {
-    return const_cast<SlottedPage *>(this)->slot_ptr(desc);
+    return const_cast<slotted_storage *>(this)->slot_ptr(desc);
   }
 
   std::pair<slot_description_t *, slot_id_t> try_find_vacant_slot() noexcept
   {
     for(slot_id_t i = 0; i < _used_slots; ++i)
     {
-      auto & desc = slot_description(i);
+      auto & desc = locate_slot_description(i);
       if(desc == slot_description_t::invalid())
         return {&desc, i};
     }
@@ -89,7 +89,7 @@ private:
       return maybe_slot;
 
     const slot_id_t slot_id = _used_slots++;
-    auto &          desc    = slot_description(slot_id);
+    auto &          desc    = locate_slot_description(slot_id);
     return {&desc, slot_id};
   }
 
@@ -101,7 +101,7 @@ public:
     const bool in_bounds = slot_id < _used_slots;
     CKVS_ASSERT(in_bounds);
 
-    const auto description = slot_description(slot_id);
+    const auto description = locate_slot_description(slot_id);
     CKVS_ASSERT(description != slot_description_t::invalid());
     return span_t{slot_ptr(description), description._size};
   }
@@ -130,7 +130,7 @@ public:
 
   void remove_slot(const slot_id_t slot_id) noexcept
   {
-    auto &     remv_desc_ref = slot_description(slot_id);
+    auto &     remv_desc_ref = locate_slot_description(slot_id);
     const auto remv_desc     = remv_desc_ref;
     remv_desc_ref            = slot_description_t::invalid();
 
@@ -144,7 +144,7 @@ public:
     bool compacting = true;
     for(slot_id_t i = _used_slots; i != 0; --i)
     {
-      auto & desc = slot_description(i - 1);
+      auto & desc = locate_slot_description(i - 1);
       // Remove invalid slots from the end of slot descriptions
       if(compacting && desc == slot_description_t::invalid())
         --_used_slots;
@@ -157,7 +157,7 @@ public:
     }
   }
 
-  void merge_with(SlottedPage & /*other*/) noexcept
+  void merge_with(slotted_storage & /*other*/) noexcept
   {
     // todo: figure out how to do overflow first, then this
     CKVS_ASSERT(false);

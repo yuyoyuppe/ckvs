@@ -14,9 +14,8 @@ paths = {
   perf_tests = "src/perf_tests/",
   build = "build/",
   deps = {
-    fmt = "deps/fmt/"
+    llfio = "deps/llfio/include/"
   },
-  modules = 'src/',
 }
 
 settings = {
@@ -59,6 +58,9 @@ local function make_common_project_conf(src_path, use_pch)
   end
   flags { "FatalWarnings", "MultiProcessorCompile" }
   includedirs{src_path, paths.build}
+  for _, path in pairs(paths.deps) do
+    includedirs(path)
+  end
   basedir (src_path)
   targetdir (paths.build .. "bin_%{cfg.architecture}")
   objdir (paths.build .. "obj")
@@ -85,7 +87,8 @@ local function make_common_project_conf(src_path, use_pch)
     symbols "FastLink"
     defines
     {
-      "NDEBUG"
+      "NDEBUG",
+      "BOOST_DISABLE_ASSERTS",
     }
     runtime "Release"
     optimize "On"
@@ -94,8 +97,16 @@ local function make_common_project_conf(src_path, use_pch)
     defines
     {
       "ASSERTS",
-      "CHECK_LEAKS"
+      -- todo: move to windows only
+      "CHECK_LEAKS",
+      "_ENABLE_EXTENDED_ALIGNED_STORAGE", -- fix msvc bug 
+      "_CRT_SECURE_NO_WARNINGS", -- we're using stdio.h only in tests, really!
+      "_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS", -- llfio
     }
+    disablewarnings 
+    { 
+      "4324", -- msvc likes to warn about the padding being present...
+    } 
 
 end
 
@@ -104,15 +115,21 @@ project "ckvs"
   defines
   {
     "_SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING",
-    "FMT_HEADER_ONLY",
-    "_CRT_SECURE_NO_WARNINGS",
   }
   make_common_project_conf(paths.ckvs)
 
   project "property_tests"
     kind "ConsoleApp"
     links { "ckvs" }
-    defines {  }
+    defines 
+    { 
+      -- 'ENABLE_SSD_TEST',
+      'SSD_PAGED_FILE_PATH="C:\\\\test.ckvs"',
+      -- 'ENABLE_HDD_TEST',
+      'HDD_PAGED_FILE_PATH="D:\\\\test.ckvs"',
+      'ENABLE_RAM_TEST', -- ram drive
+      'RAM_PAGED_FILE_PATH="R:\\\\test.ckvs"', 
+    }
     includedirs {paths.ckvs}
     make_common_project_conf(paths.property_tests)
 

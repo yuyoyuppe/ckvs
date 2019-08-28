@@ -1,7 +1,9 @@
-#include "lockfree_pool.hpp"
 
 #include <utils/common.hpp>
-#include "utils/random.hpp"
+#include <utils/random.hpp>
+
+#include <lockfree_pool.hpp>
+
 
 #include <vector>
 #include <array>
@@ -45,20 +47,21 @@ void lockfree_pool_test(const size_t iteration, std::default_random_engine & gen
 
   auto elem_ranges = *split_to_random_parts(elems, nThreads, gen);
 
-  CKVS_ASSERT(size(elem_ranges) == nThreads);
+  CKVS_ASSERT(std::size(elem_ranges) == nThreads);
   std::vector<std::thread> threads;
   for(size_t i = 0; i < nThreads; ++i)
   {
     threads.emplace_back([&elem_ranges, &pool, i] {
-      for(auto it = elem_ranges[i].first; it != elem_ranges[i].second; ++it)
+      for(auto & elem : elem_ranges[i])
       {
-        *it = pool.acquire();
-        pool.release(*it);
+        elem = pool.acquire();
+        pool.release(elem);
       }
     });
   }
   for(auto & t : threads)
-    t.join();
+    if(t.joinable())
+      t.join();
 
   for(size_t i = 0; i < nPages; ++i)
   {

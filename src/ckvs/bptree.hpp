@@ -1,6 +1,6 @@
 #pragma once
 
-#include <inttypes.h>
+#include <cinttypes>
 #include <memory>
 #include <queue>
 #include <optional>
@@ -9,10 +9,16 @@
 
 #include "detail/bptree_detail.hpp"
 #include "utils/traits.hpp"
+#include "utils/math.hpp"
 
 namespace ckvs {
 
-template <typename KeyT, typename PayloadT, size_t Order, size_t MaxCapacity = std::numeric_limits<uint32_t>::max()>
+template <typename KeyT,
+          typename PayloadT,
+          template <typename>
+          typename NodeHandleT,
+          size_t Order,
+          size_t MaxCapacity = std::numeric_limits<uint32_t>::max()>
 struct bp_tree_config
 {
   static_assert(Order % 2 == 0, "split & merge currently support only even tree arity!");
@@ -22,7 +28,9 @@ struct bp_tree_config
 
   using key_t     = KeyT;
   using payload_t = PayloadT;
-  using index_t   = utils::least_unsigned_t<order, uint8_t, uint16_t, uint32_t, uint64_t>;
+  template <typename T>
+  using node_handle_t = NodeHandleT<T>;
+  using index_t       = utils::least_unsigned_t<order, uint8_t, uint16_t, uint32_t, uint64_t>;
 
   static constexpr index_t node_max_keys = order - index_t{1};
   static constexpr index_t middle_idx    = order / index_t{2} - index_t{1};
@@ -37,13 +45,17 @@ class bp_tree : Extensions<detail::node<Config>>
 {
   using config = Config;
 
-  using index_t       = typename config::index_t;
-  using key_t         = typename config::key_t;
-  using payload_t     = typename config::payload_t;
-  using node_t        = detail::node<config>;
-  using slot_t        = typename node_t::slot_t;
-  using extensions    = Extensions<node_t>;
-  using node_handle_t = typename extensions::node_handle_t;
+  using index_t         = typename config::index_t;
+  using key_t           = typename config::key_t;
+  using payload_t       = typename config::payload_t;
+  using node_t          = detail::node<config>;
+  using node_handle_t   = typename node_t::node_handle_t;
+  using slot_t          = typename node_t::slot_t;
+  using extensions      = Extensions<node_t>;
+  using r_locked_node_t = typename extensions::r_locked_node_t;
+  using w_locked_node_t = typename extensions::w_locked_node_t;
+  using r_lock_t        = std::tuple_element_t<1, r_locked_node_t>;
+  using w_lock_t        = std::tuple_element_t<1, w_locked_node_t>;
 
   static constexpr size_t  order         = config::order;
   static constexpr index_t node_max_keys = config::node_max_keys;
@@ -51,7 +63,7 @@ class bp_tree : Extensions<detail::node<Config>>
   static_assert(std::is_trivially_copyable_v<node_t>, "nodes should be serializable!");
 
 
-  node_handle_t _root = extensions::invalid_node_handle;
+  node_handle_t _root = node_handle_t::invalid();
 
 
   using parents_trace_t = std::array<node_t *, config::upper_bound_leaf_level>;
@@ -78,28 +90,31 @@ class bp_tree : Extensions<detail::node<Config>>
     return {trace._parents, trace._parent_index - 1};
   }
 
-  std::tuple<node_t *, index_t, root_to_leaf_path> find_insertion_point(const key_t key) const noexcept
+  std::tuple<r_locked_node_t, index_t, root_to_leaf_path> trace_to_leaf(const key_t key) noexcept
   {
-    node_t *          node = _root;
+    node_handle_t     node_handle = _root;
     index_t           leaf_idx;
     root_to_leaf_path path{};
     size_t            path_depth = 0;
     for(;;)
     {
-      CKVS_ASSERT(node != nullptr);
-      leaf_idx = node->find_key_index(key);
-      CKVS_ASSERT(leaf_idx <= node->_nKeys);
-      if(!node->has_links())
+      r_locked_node_t locked_node = get_node(node_handle);
+      node_t &        node        = std::get<0>(locked_node);
+      CKVS_ASSERT(node_handle != node_handle_t::invalid());
+      leaf_idx = node.find_key_index(key);
+      CKVS_ASSERT(leaf_idx <= node._nKeys);
+      if(!node.has_links())
         break;
       else
       {
+        // todo: should be optionally locked nodes
         path._parents[path_depth++] = node;
-        node                        = node->_slots[leaf_idx]._child;
+        node_handle                 = node._slots[leaf_idx]._child;
       }
     }
-    CKVS_ASSERT(node != nullptr);
+    CKVS_ASSERT(node != node_handle_t::invalid());
     const index_t possible_eq_idx = leaf_idx - 1u > leaf_idx ? 0 : leaf_idx - 1u; // prevent underflow
-    if(key == node->_keys[possible_eq_idx])
+    if(key == node._keys[possible_eq_idx])
       leaf_idx = possible_eq_idx;
 
     path._num_parents = path_depth;
@@ -232,84 +247,88 @@ public:
   bp_tree(bp_tree && rhs) noexcept
   {
     _root     = std::move(rhs._root);
-    rhs._root = extensions::invalid_node_handle;
+    rhs._root = node_handle_t::invalid();
   }
   bp_tree & operator=(bp_tree && rhs) noexcept
   {
     delete_node(_root);
     _root     = std::move(rhs._root);
-    rhs._root = extensions::invalid_node_handle;
+    rhs._root = node_handle_t::invalid();
     return *this;
   }
 
   ~bp_tree()
   {
-    if(_root != invalid_node_handle)
+    if(_root != node_handle_t::invalid())
       delete_node(_root);
   }
 
-  void inspect(std::ostream & os) const noexcept
+  void inspect(std::ostream & os) noexcept
   {
-    uint64_t             lvl = 0;
-    std::queue<node_t *> bfs;
+    uint64_t                  lvl = 0;
+    std::queue<node_handle_t> bfs;
     bfs.push(_root);
+    node_t & root = get_node_unsafe(_root);
+
     uint64_t nodes_left_on_cur_lvl = 1;
     uint64_t nodes_left_on_nxt_lvl = 0;
-    CKVS_ASSERT(_root->is_root());
+    CKVS_ASSERT(root.is_root());
 
     uint64_t non_leaf_count = 0;
     uint64_t leaf_count     = 0;
 
-    const node_t * next_neighbor = nullptr;
+    node_handle_t next_neighbor = node_handle_t::invalid();
+
     while(!bfs.empty())
     {
-      node_t * const node = bfs.front();
+      const auto node_handle = bfs.front();
+      node_t &   node        = get_node_unsafe(node_handle);
       bfs.pop();
       os << "\tlevel " << lvl << " (";
       char * types[] = {"Internal", "Root", "Leaf", "RootLeaf"};
-      os << types[static_cast<size_t>(node->_kind)] << ")\n";
-      if(node->has_links())
+      os << types[static_cast<size_t>(node._kind)] << ")\n";
+      if(node.has_links())
         ++non_leaf_count;
       else
         ++leaf_count;
       for(index_t i = 0; i < node_max_keys; ++i)
       {
-        const bool nonempty = i < node->_nKeys;
+        const bool nonempty = i < node._nKeys;
         os << '|';
         if(nonempty)
-          os << node->_keys[i];
+          os << node._keys[i];
         else
           os << '-';
         os << '\t';
       }
       os << '\n';
 
-      if(!node->has_links())
+      if(!node.has_links())
       {
-        for(index_t i = 0; i < node->_nKeys; ++i)
+        for(index_t i = 0; i < node._nKeys; ++i)
         {
-          os << '|' << node->_slots[i]._payload << '\t';
+          os << '|' << node._slots[i]._payload << '\t';
         }
-        if(!node->is_root())
+        if(!node.is_root())
         {
-          CKVS_ASSERT(next_neighbor == node || !nodes_left_on_nxt_lvl);
+          CKVS_ASSERT(next_neighbor == node_handle || !nodes_left_on_nxt_lvl);
           ++nodes_left_on_nxt_lvl; // correct triggering assert on the line above
-          next_neighbor = node->next_sibling();
+          next_neighbor = node.next_sibling();
         }
         os << '\n';
       }
       else
       {
-        for(index_t i = 0; i <= node->_nKeys; ++i)
-          bfs.push(node->_slots[i]._child);
-        nodes_left_on_nxt_lvl += node->_nKeys + 1;
+        for(index_t i = 0; i <= node._nKeys; ++i)
+          bfs.push(node._slots[i]._child);
+        nodes_left_on_nxt_lvl += node._nKeys + 1;
       }
 
       if(--nodes_left_on_cur_lvl == 0)
       {
         ++lvl;
         std::swap(nodes_left_on_nxt_lvl, nodes_left_on_cur_lvl);
-        next_neighbor = nullptr;
+        next_neighbor = node_handle_t::invalid();
       }
     }
     const uint64_t total = non_leaf_count + leaf_count;
@@ -322,13 +341,12 @@ public:
   bp_tree(ExtensionsCtorParams &&... ext_params) noexcept
     : extensions{std::forward<ExtensionsCtorParams>(ext_params)...}
   {
-    _root         = new_node(detail::node_kind::RootLeaf);
-    _root->_nKeys = 0;
+    _root = new_node(detail::node_kind::RootLeaf);
   }
 
   void insert(const key_t key, const payload_t payload) noexcept
   {
-    const auto [node, idx, path] = find_insertion_point(key);
+    const auto [node, idx, path] = trace_to_leaf(key);
     CKVS_ASSERT(node != nullptr);
     CKVS_ASSERT(!node->has_links());
     if(node->_nKeys != node_max_keys)
@@ -352,7 +370,7 @@ public:
 
   void remove(const key_t key) noexcept
   {
-    const auto [node, idx, path] = find_insertion_point(key);
+    const auto [node, idx, path] = trace_to_leaf(key);
     if(node == nullptr || key != node->_keys[idx])
       return;
 
@@ -360,12 +378,12 @@ public:
     remove_entry(node, trace_from_path(path), key, node->_slots[idx], idx);
   }
 
-  std::optional<payload_t> find(const key_t key) const noexcept
+  std::optional<payload_t> find(const key_t key) noexcept
   {
-    const auto [node, idx, _] = find_insertion_point(key);
-    CKVS_ASSERT(node != nullptr);
-    return node->_nKeys != idx && key == node->_keys[idx] ? std::optional<payload_t>{node->_slots[idx]._payload} :
-                                                            std::nullopt;
+    auto [locked_node, idx, _] = trace_to_leaf(key);
+    node_t & node              = std::get<0>(locked_node);
+    return node._nKeys != idx && key == node._keys[idx] ? std::optional<payload_t>{node._slots[idx]._payload} :
+                                                          std::nullopt;
   }
 };
 

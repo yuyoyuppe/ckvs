@@ -1,9 +1,9 @@
 
-#include "utils/common.hpp"
-#include "utils/random.hpp"
-#include "utils/traits.hpp"
+#include <utils/common.hpp>
+#include <utils/random.hpp>
+#include <utils/traits.hpp>
 
-#include "slotted_page.hpp"
+#include <slotted_storage.hpp>
 
 #include <iostream>
 #include <unordered_map>
@@ -18,7 +18,7 @@ constexpr size_t page_size         = 1024;
 constexpr size_t max_bin_slot_size = 512;
 constexpr size_t max_variants      = 256;
 
-using page_t = SlottedPage<page_size>;
+using page_t = slotted_storage<page_size>;
 
 using page_value_variant_t = std::variant<uint64_t, uint32_t, float, double, std::string>;
 static_assert(4 == sizeof(float) && 8 == sizeof(double));

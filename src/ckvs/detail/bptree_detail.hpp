@@ -7,13 +7,17 @@
 namespace ckvs { namespace detail {
 enum class node_kind : uint8_t { Internal, Root, Leaf, RootLeaf };
 
-template <typename NodeT, typename PayloadT>
+// todo: std::aligned_union
+template <typename NodeHandleT, typename PayloadT>
 union slot
 {
-  PayloadT _payload;
-  NodeT *  _child;
+  // todo!
+  //static_assert(!std::is_pointer_v<NodeT> && !std::is_pointer_v<PayloadT>);
 
-  inline slot & operator=(NodeT * child) noexcept
+  PayloadT    _payload;
+  NodeHandleT _child;
+
+  inline slot & operator=(NodeHandleT child) noexcept
   {
     _child = child;
     return *this;
@@ -27,7 +31,7 @@ union slot
 
   explicit slot(PayloadT v) noexcept : _payload(v) {}
 
-  explicit slot(NodeT * v) noexcept : _child(v) {}
+  explicit slot(NodeHandleT v) noexcept : _child(v) {}
 
   slot() = default;
 
@@ -39,11 +43,12 @@ union slot
 template <typename Config>
 struct node
 {
-  using config    = Config;
-  using index_t   = typename config::index_t;
-  using payload_t = typename config::payload_t;
-  using key_t     = typename config::key_t;
-  using slot_t    = slot<node, payload_t>;
+  using config        = Config;
+  using index_t       = typename config::index_t;
+  using payload_t     = typename config::payload_t;
+  using node_handle_t = typename config::template node_handle_t<node>;
+  using key_t         = typename config::key_t;
+  using slot_t        = slot<node_handle_t, payload_t>;
 
   static constexpr size_t order = config::order;
 
@@ -52,7 +57,7 @@ struct node
   key_t     _keys[order - 1];
   slot_t    _slots[order];
 
-  node(const node_kind kind) noexcept : _kind(kind) {}
+  node(const node_kind kind) noexcept : _kind{kind}, _nKeys{0} {}
 
   bool has_links() const noexcept { return _kind < node_kind::Leaf; }
 
@@ -259,7 +264,7 @@ struct node
     return stolen_key;
   }
 
-  node * next_sibling() const noexcept
+  node_handle_t next_sibling() const noexcept
   {
     CKVS_ASSERT(!has_links() && !is_root());
     return _slots[config::node_max_keys]._child;

@@ -1,11 +1,14 @@
 #pragma once
 
 #include "common.hpp"
+#include "variant.hpp"
 
 #include <set>
 #include <optional>
 #include <vector>
 #include <random>
+
+#include <boost/range.hpp>
 
 // Mostly stuff for simple property-based testing
 
@@ -13,7 +16,7 @@ namespace ckvs { namespace utils {
 
 template <typename ContainterT,
           typename IterT   = decltype(std::begin(std::declval<ContainterT &>())),
-          typename ResultT = std::vector<std::pair<IterT, IterT>>>
+          typename ResultT = std::vector<boost::iterator_range<IterT>>>
 auto split_to_random_parts(ContainterT && v, const size_t nParts, std::default_random_engine & gen)
   -> std::optional<ResultT>
 {
@@ -63,11 +66,12 @@ inline void random_value(const size_t                 min_length,
                          std::string &                s,
                          std::default_random_engine & gen)
 {
-  const size_t                         len = std::uniform_int<size_t>{min_length, max_length}(gen);
-  std::uniform_int_distribution<short> dst{32, 126};
+  const size_t len = std::uniform_int_distribution<size_t>{min_length, max_length}(gen);
+
+  std::uniform_int_distribution<short> char_gen{32, 126};
   s.resize(len);
   for(char & c : s)
-    while(!isalnum(c = static_cast<char>(dst(gen))))
+    while(!isalnum(c = static_cast<char>(char_gen(gen))))
       continue;
 }
 

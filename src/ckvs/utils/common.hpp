@@ -1,27 +1,22 @@
 #pragma once
 
 #include <string>
-#include <variant>
 #include <random>
 #include <string_view>
 #include <cinttypes>
 #include <chrono>
 
 namespace ckvs { namespace utils {
-namespace detail {
-template <typename VariantT, size_t... Indices>
-void default_init_variant_detail(VariantT & v, const size_t alt_idx, std::index_sequence<Indices...>)
-{
-  (... ||
-   (Indices == alt_idx && ((v = std::variant_alternative_t<Indices, std::remove_reference_t<VariantT>>{}), true)));
-}
-}
 
-template <typename... T>
-void default_init_variant(std::variant<T...> & v, const size_t alt_idx)
+struct pinned
 {
-  detail::default_init_variant_detail(v, alt_idx, std::make_index_sequence<sizeof...(T)>{});
-}
+  pinned()               = default;
+  pinned(const pinned &) = delete;
+  pinned(pinned &&)      = delete;
+
+  pinned & operator=(const pinned &) = delete;
+  pinned & operator=(pinned &&) = delete;
+};
 
 template <typename... Ts>
 struct overloaded : Ts...
@@ -38,12 +33,10 @@ std::string_view as_string_view(const T & v)
   return {reinterpret_cast<const char *>(&v), sizeof(T)};
 }
 
-template <typename... T>
-std::string_view as_string_view(const std::variant<T...> & var)
+template <typename T>
+inline void default_delete(T * p) noexcept
 {
-  return std::visit(overloaded{[](auto && v) { return as_string_view(v); },
-                               [](const std::string & s) -> std::string_view { return {s}; }},
-                    var);
+  delete p;
 }
 
 template <typename Func>
@@ -63,51 +56,7 @@ double profiled(Func && f, bool one_shot = true, double runtime_in_seconds = 1.)
   }
   return runtime / run_count;
 }
-
-constexpr double abs(const double number) { return number > 0. ? number : -number; }
-
-constexpr size_t ceil(const double val)
-{
-  double fract = abs(val - static_cast<size_t>(val));
-  return static_cast<size_t>(val - fract) + 1;
-}
-
-constexpr size_t floor(const double val)
-{
-  double fract = abs(val - static_cast<size_t>(val));
-  return static_cast<size_t>(val - fract);
-}
-
-constexpr double approx_log(size_t base, size_t number)
-{
-  size_t a = 0;
-  size_t b = 0;
-
-  while(number >>= 1)
-    b++;
-  while(base >>= 1)
-    a++;
-  return static_cast<double>(b) / a;
-}
-
 }}
-
-
-struct leak_reporter
-{
-  leak_reporter()
-  {
-#if defined(CHECK_LEAKS)
-    _CrtSetReportMode(_CRT_WARN, _CRTDBG_MODE_FILE);
-    _CrtSetReportFile(_CRT_WARN, _CRTDBG_FILE_STDOUT);
-    _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
-    _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDOUT);
-    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
-    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDOUT);
-#endif
-  }
-  ~leak_reporter() { _CrtDumpMemoryLeaks(); }
-};
 
 #if defined(ASSERTS)
 #define CKVS_ASSERT(cond)                                                                                              \
