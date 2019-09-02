@@ -1,5 +1,3 @@
-#pragma once
-
 #include "paged_file.hpp"
 #include "ring.hpp"
 
@@ -220,7 +218,7 @@ public:
     _io_has_work_signal.notify_one();
   }
 
-  void throw_if_io_thread_failed()
+  void try_rethrow_io_thread_ex()
   {
     if(_io_thread_has_error.load(std::memory_order_acquire))
       std::rethrow_exception(_io_thread_error);
@@ -231,10 +229,10 @@ public:
        page_request::completion_callback_t read_callback,
        page_request::completion_callback_t write_callback,
        truncate_callback_t                 truncate_callback)
-    : _page_size{page_size}
-    , _read_cb{std::move(read_callback)}
+    : _read_cb{std::move(read_callback)}
     , _write_cb{std::move(write_callback)}
     , _truncate_cb{std::move(truncate_callback)}
+    , _page_size{page_size}
   {
     _io_thread = std::thread{[this, ap = std::move(absolute_path)]() mutable {
       try
@@ -284,13 +282,13 @@ paged_file::paged_file(fs::path &&                         absolute_path,
 
 size_t paged_file::size_in_pages()
 {
-  _impl->throw_if_io_thread_failed();
+  _impl->try_rethrow_io_thread_ex();
   return _impl->_size_in_pages;
 }
 
 void paged_file::shrink(const size_t nPages)
 {
-  _impl->throw_if_io_thread_failed();
+  _impl->try_rethrow_io_thread_ex();
 
   while(!_impl->_pending_requests.try_push(truncation_request{-static_cast<int64_t>(nPages)}))
     continue;
@@ -300,7 +298,7 @@ void paged_file::shrink(const size_t nPages)
 
 void paged_file::extend(size_t nPages)
 {
-  _impl->throw_if_io_thread_failed();
+  _impl->try_rethrow_io_thread_ex();
 
   while(!_impl->_pending_requests.try_push(truncation_request{static_cast<int64_t>(nPages)}))
     continue;
@@ -309,7 +307,7 @@ void paged_file::extend(size_t nPages)
 
 void paged_file::request(paged_file::page_request r)
 {
-  _impl->throw_if_io_thread_failed();
+  _impl->try_rethrow_io_thread_ex();
 
   while(!_impl->_pending_requests.try_push(r))
     continue;

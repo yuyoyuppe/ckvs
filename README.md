@@ -31,10 +31,9 @@ https://15445.courses.cs.cmu.edu/fall2018/slides/05-bufferpool.pdf
 
 # Performance test results
 
-## Syntetic `paged_file` vs single-threaded `ofstream` random write test
+## Syntetic [`paged_file`](https://github.com/yuyoyuppe/ckvs/blob/9a0536ded0d3d2321c42afcc49a183b1f15d2fe8/src/property_tests/paged_file.cpp#L166) vs [single-threaded `ofstream`](https://github.com/yuyoyuppe/ckvs/blob/9a0536ded0d3d2321c42afcc49a183b1f15d2fe8/src/property_tests/paged_file.cpp#L30) random write test
 ```
 Writing ~10K pages of size 16KB, async has 8 threads:
-Running test #0 ...
 ===HDD==
 async completed in 1.976 sec
 ofstream completed 33.468 sec
@@ -67,9 +66,10 @@ Note: `<arch>` in the following lists could be `x86` or `x64`.
 ## Linux
   - [Get premake5](https://github.com/premake/premake-core/releases/download/v5.0.0-alpha14/premake-5.0.0-alpha14-linux.tar.gz) and add it to your `PATH`
   - install boost(aptitude/pacman)
-  - `> premake5 vs2017`
+  - `> premake5 gmake2`
   - `> cd build`
-  - `> msbuild project.sln /p:Configuration=Release /p:Platform=<arch>`
+  - `> make`
   - `> cd bin_<arch>`
+
 
 Now you can run `property_tests` or `functional_tests` binaries.

@@ -16,6 +16,7 @@ paths = {
   deps = {
     llfio = "deps/llfio/include/"
   },
+  modules = 'src/',
 }
 
 settings = {
@@ -90,8 +91,11 @@ local function make_common_project_conf(src_path, use_pch)
       "NDEBUG",
       "BOOST_DISABLE_ASSERTS",
     }
+    flags {"NoBufferSecurityCheck", "LinkTimeOptimization"}
+    buildoptions {"/GR-"
+  }
     runtime "Release"
-    optimize "On"
+    optimize "Full"
   
   filter {}
     defines
@@ -124,11 +128,11 @@ project "ckvs"
     defines 
     { 
       -- 'ENABLE_SSD_TEST',
-      'SSD_PAGED_FILE_PATH="C:\\\\test.ckvs"',
+      'SSD_PAGED_FILE_PATH=R"(C:\\test.ckvs)"',
       -- 'ENABLE_HDD_TEST',
-      'HDD_PAGED_FILE_PATH="D:\\\\test.ckvs"',
+      'HDD_PAGED_FILE_PATH=R"(D:\\test.ckvs)"',
       'ENABLE_RAM_TEST', -- ram drive
-      'RAM_PAGED_FILE_PATH="R:\\\\test.ckvs"', 
+      'RAM_PAGED_FILE_PATH=R"(R:\\test.ckvs)"', 
     }
     includedirs {paths.ckvs}
     make_common_project_conf(paths.property_tests)

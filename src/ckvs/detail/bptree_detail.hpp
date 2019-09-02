@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <boost/thread/null_mutex.hpp>
 
 #include "../utils/common.hpp"
 
@@ -57,20 +58,49 @@ struct node
   key_t     _keys[order - 1];
   slot_t    _slots[order];
 
+  //#if false // Allows catching bugs at compile time, but break is_trivially_copyable :)
+  node(const node &) = delete;
+  node & operator=(const node &) = delete;
+  //#endif
+
   node(const node_kind kind) noexcept : _kind{kind}, _nKeys{0} {}
 
   bool has_links() const noexcept { return _kind < node_kind::Leaf; }
 
   bool is_root() const noexcept { return _kind == node_kind::Root || _kind == node_kind::RootLeaf; };
 
-  key_t distribute_payload(node *          greater_dst,
+  bool safe_for_insert() const noexcept { return _nKeys != config::node_max_keys; };
+
+  bool safe_for_remove() const noexcept { return has_enough_slots_with(_nKeys - 1); }
+
+  node_handle_t next_sibling() const noexcept
+  {
+    CKVS_ASSERT(!has_links() && !is_root());
+    return _slots[config::node_max_keys]._child;
+  }
+
+  bool has_enough_slots_with(const index_t nKeys) const noexcept
+  {
+    CKVS_ASSERT(nKeys <= config::node_max_keys);
+    return nKeys >= config::middle_idx + !has_links() || is_root() && nKeys > 0;
+  }
+
+  bool has_enough_slots() const noexcept { return has_enough_slots_with(_nKeys); }
+
+  bool can_coalesce_with(const node & sibling) const noexcept
+  {
+    CKVS_ASSERT(sibling._kind == _kind);
+    return sibling._nKeys + _nKeys <= config::node_max_keys - has_links();
+  }
+
+  key_t distribute_payload(node &          greater_dst,
                            const index_t   idx,
                            const key_t     new_key,
                            const payload_t new_value) noexcept
   {
-    CKVS_ASSERT(has_links() == greater_dst->has_links());
+    CKVS_ASSERT(has_links() == greater_dst.has_links());
 
-    _nKeys = greater_dst->_nKeys = order / 2;
+    _nKeys = greater_dst._nKeys = order / 2;
 
     const index_t split_start_idx = config::middle_idx + 1;
 
@@ -79,21 +109,21 @@ struct node
     if(idx > config::middle_idx)
     {
       sparse_key = idx == split_start_idx ? new_key : _keys[split_start_idx];
-      std::copy(_keys + split_start_idx, _keys + idx, greater_dst->_keys);
-      greater_dst->_keys[idx - split_start_idx] = new_key;
-      std::copy(_keys + idx, _keys + config::node_max_keys, greater_dst->_keys + 1 + (idx - split_start_idx));
+      std::copy(_keys + split_start_idx, _keys + idx, greater_dst._keys);
+      greater_dst._keys[idx - split_start_idx] = new_key;
+      std::copy(_keys + idx, _keys + config::node_max_keys, greater_dst._keys + 1 + (idx - split_start_idx));
 
-      std::copy(_slots + split_start_idx, _slots + idx, greater_dst->_slots);
-      greater_dst->_slots[idx - split_start_idx] = new_value;
-      std::copy(_slots + idx, _slots + config::node_max_keys + 1, greater_dst->_slots + 1 + (idx - split_start_idx));
+      std::copy(_slots + split_start_idx, _slots + idx, greater_dst._slots);
+      greater_dst._slots[idx - split_start_idx] = new_value;
+      std::copy(_slots + idx, _slots + config::node_max_keys + 1, greater_dst._slots + 1 + (idx - split_start_idx));
     }
     // Otherwise, just copy the greater half + the biggest KV from our half, since we must remove it to create
     // place for the new KV.
     else
     {
       sparse_key = _keys[config::middle_idx];
-      std::copy(_keys + config::middle_idx, _keys + config::node_max_keys, greater_dst->_keys);
-      std::copy(_slots + config::middle_idx, _slots + config::node_max_keys + 1, greater_dst->_slots);
+      std::copy(_keys + config::middle_idx, _keys + config::node_max_keys, greater_dst._keys);
+      std::copy(_slots + config::middle_idx, _slots + config::node_max_keys + 1, greater_dst._slots);
       if(idx == config::middle_idx)
       {
         _keys[idx]  = new_key;
@@ -108,14 +138,14 @@ struct node
     return sparse_key;
   }
 
-  key_t distribute_children(node *        greater_dst,
-                            const index_t insert_idx,
-                            const key_t   new_key,
-                            node *        new_right_child) noexcept
+  key_t distribute_children(node &              greater_dst,
+                            const index_t       insert_idx,
+                            const key_t         new_key,
+                            const node_handle_t new_right_child) noexcept
   {
     CKVS_ASSERT(has_links());
     CKVS_ASSERT(_nKeys == config::node_max_keys);
-    CKVS_ASSERT(greater_dst->has_links());
+    CKVS_ASSERT(greater_dst.has_links());
 
     // Whether new_key goes to this node or dst determines which indices we should shift
     const bool insert_here = insert_idx < config::middle_idx;
@@ -123,8 +153,8 @@ struct node
     const key_t sparse_key = config::middle_idx == insert_idx ? new_key : _keys[config::middle_idx - insert_here];
 
     // Since for x keys we have x+1 slots, we can't distribute evenly
-    _nKeys              = config::middle_idx;
-    greater_dst->_nKeys = order - _nKeys - 1;
+    _nKeys             = config::middle_idx;
+    greater_dst._nKeys = order - _nKeys - 1;
 
     // We must copy the greater half of all KVs to the new greater_dst node. Since we out of space to store the
     // new KV-pair, we use imaginary node of order + 1 which could hold all our KVs as well as the new KV-pair.
@@ -134,10 +164,10 @@ struct node
     {
       const index_t dst_idx = img_node_idx - split_start_idx;
 
-      const bool    shift_slots           = !insert_here && img_node_idx > insert_idx;
-      const bool    use_new_child         = !insert_here && img_node_idx == insert_idx + 1;
-      const index_t node_val_idx          = img_node_idx - shift_slots - insert_here;
-      greater_dst->_slots[dst_idx]._child = use_new_child ? new_right_child : _slots[node_val_idx]._child;
+      const bool    shift_slots          = !insert_here && img_node_idx > insert_idx;
+      const bool    use_new_child        = !insert_here && img_node_idx == insert_idx + 1;
+      const index_t node_val_idx         = img_node_idx - shift_slots - insert_here;
+      greater_dst._slots[dst_idx]._child = use_new_child ? new_right_child : _slots[node_val_idx]._child;
 
       if(img_node_idx == order)
         continue;
@@ -145,7 +175,7 @@ struct node
       const bool    shift_key_indices = !insert_here && img_node_idx >= insert_idx;
       const bool    use_new_key       = !insert_here && img_node_idx == insert_idx;
       const index_t node_key_idx      = img_node_idx - shift_key_indices - insert_here;
-      greater_dst->_keys[dst_idx]     = use_new_key ? new_key : _keys[node_key_idx];
+      greater_dst._keys[dst_idx]      = use_new_key ? new_key : _keys[node_key_idx];
     }
 
     // Since we copied our last KV pair to dst to be able to fit the new KV pair, we need to remove it from this
@@ -235,15 +265,15 @@ struct node
     _slots[config::node_max_keys]._child = greater_partial_node->_slots[config::node_max_keys]._child;
   }
 
-  key_t steal_smallest(node * greater_node) noexcept
+  key_t steal_smallest(node & greater_node) noexcept
   {
     const index_t slot_idx = 0;
     const index_t key_idx  = 0;
 
-    const auto  stolen_slot = greater_node->_slots[slot_idx];
-    const auto  stolen_key  = greater_node->_keys[key_idx];
-    const key_t sparse_key  = greater_node->_keys[!has_links()];
-    greater_node->remove(stolen_key, stolen_slot, key_idx);
+    const auto  stolen_slot = greater_node._slots[slot_idx];
+    const auto  stolen_key  = greater_node._keys[key_idx];
+    const key_t sparse_key  = greater_node._keys[!has_links()];
+    greater_node.remove(stolen_key, stolen_slot, key_idx);
 
     const index_t value_idx_hint = _nKeys + has_links();
     insert_hinted(stolen_key, stolen_slot, _nKeys, value_idx_hint);
@@ -251,34 +281,151 @@ struct node
     return sparse_key;
   }
 
-  key_t steal_greatest(node * lesser_node) noexcept
+  key_t steal_greatest(node & lesser_node) noexcept
   {
-    const index_t slot_idx = lesser_node->_nKeys - !has_links();
-    const index_t key_idx  = lesser_node->_nKeys - 1;
+    const index_t slot_idx = lesser_node._nKeys - !has_links();
+    const index_t key_idx  = lesser_node._nKeys - 1;
 
-    const auto stolen_slot = lesser_node->_slots[slot_idx];
-    const auto stolen_key  = lesser_node->_keys[key_idx];
-    lesser_node->remove(stolen_key, stolen_slot, key_idx);
+    const auto stolen_slot = lesser_node._slots[slot_idx];
+    const auto stolen_key  = lesser_node._keys[key_idx];
+    lesser_node.remove(stolen_key, stolen_slot, key_idx);
     insert_hinted(stolen_key, stolen_slot, 0, 0);
 
     return stolen_key;
   }
+};
 
-  node_handle_t next_sibling() const noexcept
+enum class traverse_policy { search, insert, insert_optimistic, remove, remove_optimistic };
+
+template <traverse_policy Policy>
+struct traversal_policy_traits
+{
+};
+
+template <>
+struct traversal_policy_traits<traverse_policy::search>
+{
+  constexpr static inline bool lock_non_leaf_exclusive = false;
+  constexpr static inline bool lock_leaf_exclusive     = false;
+  template <typename Config>
+  static inline bool safe_to_unlock(const node<Config> &) noexcept
   {
-    CKVS_ASSERT(!has_links() && !is_root());
-    return _slots[config::node_max_keys]._child;
+    return true;
+  }
+  constexpr static inline traverse_policy policy_if_unsafe = traverse_policy::search;
+};
+
+template <>
+struct traversal_policy_traits<traverse_policy::insert>
+{
+  constexpr static inline bool lock_non_leaf_exclusive = true;
+  constexpr static inline bool lock_leaf_exclusive     = true;
+  template <typename Config>
+  static inline bool safe_to_unlock(const node<Config> & node) noexcept
+  {
+    return node.safe_for_insert();
+  }
+  constexpr static inline traverse_policy policy_if_unsafe = traverse_policy::insert;
+};
+
+template <>
+struct traversal_policy_traits<traverse_policy::insert_optimistic>
+{
+  constexpr static inline bool lock_non_leaf_exclusive = false;
+  constexpr static inline bool lock_leaf_exclusive     = true;
+  template <typename Config>
+  static inline bool safe_to_unlock(const node<Config> & node) noexcept
+  {
+    return node.safe_for_insert();
+  }
+  constexpr static inline traverse_policy policy_if_unsafe = traverse_policy::insert;
+};
+
+template <>
+struct traversal_policy_traits<traverse_policy::remove>
+{
+  constexpr static inline bool lock_non_leaf_exclusive = true;
+  constexpr static inline bool lock_leaf_exclusive     = true;
+  template <typename Config>
+  static inline bool safe_to_unlock(const node<Config> & node) noexcept
+  {
+    return node.safe_for_remove();
+  }
+  constexpr static inline traverse_policy policy_if_unsafe = traverse_policy::remove;
+};
+
+template <>
+struct traversal_policy_traits<traverse_policy::remove_optimistic>
+{
+  constexpr static inline bool lock_non_leaf_exclusive = false;
+  constexpr static inline bool lock_leaf_exclusive     = true;
+  template <typename Config>
+  static inline bool safe_to_unlock(const node<Config> & node) noexcept
+  {
+    return node.safe_for_remove();
+  }
+  constexpr static inline traverse_policy policy_if_unsafe = traverse_policy::remove;
+};
+
+template <typename T>
+struct ptr_wrap
+{
+  T * _ptr;
+
+  bool operator==(const ptr_wrap & rhs) const { return _ptr == rhs._ptr; }
+  bool operator!=(const ptr_wrap & rhs) const { return _ptr != rhs._ptr; }
+
+  static inline ptr_wrap invalid() { return ptr_wrap{nullptr}; }
+};
+
+template <typename NodeT>
+struct default_extentions
+{
+  using node_t        = NodeT;
+  using node_handle_t = ptr_wrap<node_t>;
+
+  using r_lock_t        = std::shared_lock<boost::null_mutex>;
+  using w_lock_t        = std::unique_lock<boost::null_mutex>;
+  using r_locked_node_t = std::tuple<node_t &, r_lock_t>;
+  using w_locked_node_t = std::tuple<node_t &, w_lock_t>;
+
+  void update_root(const node_handle_t new_root) noexcept { (void)new_root; }
+  template <bool ExclusivelyLocked>
+  using select_locked_node_t = std::conditional_t<ExclusivelyLocked, w_locked_node_t, r_locked_node_t>;
+
+  template <bool ExclusivelyLocked>
+  select_locked_node_t<ExclusivelyLocked> get_node(const node_handle_t handle) noexcept
+  {
+    return {*handle._ptr, r_lock_t{}};
+  }
+  template <>
+  select_locked_node_t<true> get_node<true>(const node_handle_t handle) noexcept
+  {
+    return {*handle._ptr, w_lock_t{}};
   }
 
-  bool has_enough_slots() const noexcept
+  inline node_t &        get_node_unsafe(const node_handle_t handle) noexcept { return *handle._ptr; }
+  inline w_locked_node_t upgrade_to_node_exclusive(const node_handle_t, r_locked_node_t & locked_node) noexcept
   {
-    return _nKeys >= config::middle_idx + !has_links() || is_root() && _nKeys > 0;
+    std::shared_lock<boost::null_mutex> shared;
+    return {std::get<node_t &>(locked_node), w_lock_t{}};
   }
 
-  bool can_coalesce_with(const node & sibling) const noexcept
+  inline void delete_node(const node_handle_t n) noexcept
   {
-    CKVS_ASSERT(sibling._kind == _kind);
-    return sibling._nKeys + _nKeys <= config::node_max_keys - has_links();
+    static_assert(noexcept(std::declval<node_t>().~node_t()));
+    delete n._ptr;
+  }
+
+  template <typename... NodeCtorParams>
+  inline std::tuple<node_handle_t, w_locked_node_t> new_node(NodeCtorParams &&... params) noexcept
+  {
+    static_assert(noexcept(node_t(std::forward<NodeCtorParams>(params)...)));
+    auto n = new node_t{std::forward<NodeCtorParams>(params)...}; // Will terminate() on bad_alloc
+    ;
+    return {node_handle_t{n}, w_locked_node_t{*n, w_lock_t{}}};
   }
 };
+
+
 }}

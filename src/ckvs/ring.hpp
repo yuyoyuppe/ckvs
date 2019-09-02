@@ -10,7 +10,7 @@
 #include "utils/spinlock.hpp"
 
 namespace ckvs {
-template <typename ValueT, typename size_t capacity = 1024, typename LockT = utils::spinlock>
+template <typename ValueT, size_t capacity = 1024, typename LockT = utils::spinlock>
 struct ring
 {
   using value_t = ValueT;
