@@ -52,6 +52,7 @@ void paged_file_test_for_path(const size_t                 nPages,
                               std::default_random_engine & gen,
                               std::ostream &               os)
 {
+  /*
   const size_t nThreads = std::thread::hardware_concurrency();
 
   std::vector<page_t> pages{nPages};
@@ -160,6 +161,7 @@ void paged_file_test_for_path(const size_t                 nPages,
     os << "unknown exception!\n";
     CKVS_ASSERT(false);
   }
+  */
 }
 
 

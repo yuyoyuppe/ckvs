@@ -12,9 +12,6 @@ enum class node_kind : uint8_t { Internal, Root, Leaf, RootLeaf };
 template <typename NodeHandleT, typename PayloadT>
 union slot
 {
-  // todo: we need to make sure they're serializable and do not depend on sizeof(void*)
-  static_assert(!std::is_pointer_v<NodeHandleT> && !std::is_pointer_v<PayloadT>);
-
   PayloadT    _payload;
   NodeHandleT _child;
 
@@ -47,7 +44,7 @@ struct node
   using config        = Config;
   using index_t       = typename config::index_t;
   using payload_t     = typename config::payload_t;
-  using node_handle_t = typename config::template node_handle_t<node>;
+  using node_handle_t = typename config::node_handle_t;
   using key_t         = typename config::key_t;
   using slot_t        = slot<node_handle_t, payload_t>;
 
@@ -378,11 +375,11 @@ struct ptr_wrap
   static inline ptr_wrap invalid() noexcept { return ptr_wrap{nullptr}; }
 };
 
-template <typename NodeT>
+template <typename NodeT, typename NodeHandleT>
 struct default_extentions
 {
   using node_t        = NodeT;
-  using node_handle_t = ptr_wrap<node_t>;
+  using node_handle_t = NodeHandleT;
 
   using r_lock_t        = std::shared_lock<boost::null_mutex>;
   using w_lock_t        = std::unique_lock<boost::null_mutex>;

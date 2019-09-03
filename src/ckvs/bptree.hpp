@@ -27,11 +27,13 @@ struct bp_tree_config
 
   static constexpr size_t order = Order;
 
-  using key_t     = KeyT;
-  using payload_t = PayloadT;
-  template <typename T>
-  using node_handle_t = NodeHandleT<T>;
+  using key_t         = KeyT;
+  using payload_t     = PayloadT;
+  using node_t        = detail::node<bp_tree_config>;
+  using node_handle_t = NodeHandleT<node_t>;
   using index_t       = utils::least_unsigned_t<order, uint8_t, uint16_t, uint32_t, uint64_t>;
+
+  static_assert(utils::is_serializable_v<node_t>);
 
   static constexpr index_t node_max_keys = order - index_t{1};
   static constexpr index_t middle_idx    = order / index_t{2} - index_t{1};
@@ -42,17 +44,17 @@ struct bp_tree_config
 };
 
 template <typename Config, template <typename...> typename Extensions = detail::default_extentions>
-class bp_tree : Extensions<detail::node<Config>>
+class bp_tree : Extensions<detail::node<Config>, typename Config::node_handle_t>
 {
   using config = Config;
 
   using index_t         = typename config::index_t;
   using key_t           = typename config::key_t;
   using payload_t       = typename config::payload_t;
-  using node_t          = detail::node<config>;
+  using node_t          = typename config::node_t;
   using node_handle_t   = typename node_t::node_handle_t;
   using slot_t          = typename node_t::slot_t;
-  using extensions      = Extensions<node_t>;
+  using extensions      = Extensions<node_t, node_handle_t>;
   using r_locked_node_t = typename extensions::r_locked_node_t;
   using w_locked_node_t = typename extensions::w_locked_node_t;
   using r_lock_t        = std::tuple_element_t<1, r_locked_node_t>;
@@ -65,7 +67,6 @@ class bp_tree : Extensions<detail::node<Config>>
 
   static_assert(std::is_trivially_copyable_v<node_t>, "nodes should be serializable!");
 
-  // todo: make sure it's threadsafe. also rename to root_handle. also maybe we can
   node_handle_t _root_handle = node_handle_t::invalid();
 
   template <typename LockedT>
@@ -323,6 +324,7 @@ public:
   }
   bp_tree & operator=(bp_tree && rhs) noexcept
   {
+    // todo: if(!config::persistent)
     delete_node(_root_handle);
     _root_handle     = std::move(rhs._root_handle);
     rhs._root_handle = node_handle_t::invalid();
@@ -331,6 +333,7 @@ public:
 
   ~bp_tree()
   {
+    // todo: if(!config::persistent)
     if(_root_handle != node_handle_t::invalid())
       delete_node(_root_handle);
   }

@@ -41,6 +41,7 @@ public:
     return true;
   }
 
+  // todo: rework to consume_all, which pops all values to callbacks while locking a single time
   bool try_pop(value_t & value)
   {
     std::unique_lock<lock_t> lock{_lock, std::try_to_lock};

@@ -21,6 +21,7 @@ void page_cache_test(const size_t /*iteration*/, std::default_random_engine & ge
   const page_id_t       to_fill = std::max(nThreads, static_cast<page_id_t>(page_io_capacity / 10. * nat_gen(gen)));
   lockfree_pool<page_t> toy_file_view{page_io_capacity};
 
+  /*
   page_cache<page_t, page_id_t> page_cache{page_io_capacity};
 
   std::uniform_int_distribution<page_id_t> id_gen{1, std::numeric_limits<page_id_t>::max()};
@@ -76,4 +77,5 @@ void page_cache_test(const size_t /*iteration*/, std::default_random_engine & ge
     auto maybe_page = page_cache.try_get_page_shared(page_id);
     CKVS_ASSERT(maybe_page == std::nullopt);
   }
+  */
 }

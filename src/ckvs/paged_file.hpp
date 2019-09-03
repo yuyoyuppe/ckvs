@@ -1,5 +1,7 @@
 #pragma once
 
+#include "page_descriptor.hpp"
+
 #include "utils/common.hpp"
 #include "utils/validated_val.hpp"
 
@@ -17,55 +19,18 @@ class paged_file
   std::unique_ptr<impl, decltype(&utils::default_delete<impl>)> _impl;
 
 public:
-  using truncate_callback_t = std::function<void(const uint64_t new_number_of_pages)>;
-  class page_request
-  {
-    uint64_t                          _page_id;
-    void *                            _buffer;
-    static inline constexpr uintptr_t highest_ptr_bit = uintptr_t{1} << (sizeof(_buffer) * CHAR_BIT - size_t{1});
+  static constexpr inline uint32_t extend_granularity              = 1000;
+  static constexpr inline uint32_t minimal_required_page_alignment = 512;
 
-  public:
-    using completion_callback_t = std::function<void(const uint64_t page_id)>;
-
-    bool is_read_request() const noexcept { return (highest_ptr_bit & reinterpret_cast<uintptr_t>(_buffer)) == 0; }
-
-    bool is_write_request() const noexcept { return (highest_ptr_bit & reinterpret_cast<uintptr_t>(_buffer)) != 0; }
-
-    uint64_t page_id() const noexcept { return _page_id; }
-
-    std::byte * buffer() const noexcept
-    {
-      return reinterpret_cast<std::byte *>(reinterpret_cast<uintptr_t>(_buffer) & ~highest_ptr_bit);
-    }
-    inline static page_request make_read_request(uint64_t page_id, std::byte * src_buffer) noexcept
-    {
-      page_request res;
-      res._page_id = page_id;
-      res._buffer  = src_buffer;
-      return res;
-    }
-
-    inline static page_request make_write_request(uint64_t page_id, std::byte * dst_buffer) noexcept
-    {
-      page_request res;
-      res._page_id = page_id;
-      res._buffer  = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(dst_buffer) | highest_ptr_bit);
-      return res;
-    }
-  };
-
-  paged_file(std::filesystem::path &&            absolute_path,
-             const uint64_t                      page_size,
-             page_request::completion_callback_t read_callback,
-             page_request::completion_callback_t write_callback,
-             truncate_callback_t                 truncate_callback);
+  paged_file(std::filesystem::path && absolute_path, const uint64_t page_size);
 
   constexpr static inline uint64_t                         invalid_size  = std::numeric_limits<size_t>::max();
   constexpr static inline std::chrono::duration<long long> io_sleep_time = std::chrono::seconds{1};
-  uint64_t                                                 size_in_pages();
-  void                                                     shrink(const uint64_t nPages);
-  void                                                     extend(const uint64_t nPages);
-  void                                                     request(page_request r);
+
+  void request(page_descriptor * r);
+
+  // UNSAFE to submit concurrently with page requests, only use during thread-unsafe compaction etc.
+  void shrink(const uint64_t nPages);
 };
 
 }

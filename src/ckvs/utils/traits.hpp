@@ -32,6 +32,7 @@ constexpr size_t pick_least_unsigned_type_idx(std::tuple<Unsigneds...> &&, size_
 }
 }
 
+
 // similar to https://www.boost.org/doc/libs/1_47_0/libs/integer/doc/html/boost_integer/integer.html#boost_integer.integer.sized but allows supplementing arbitrary type list to select from.
 template <size_t Value, typename... T>
 class least_unsigned
@@ -44,4 +45,9 @@ public:
 
 template <size_t Value, typename... T>
 using least_unsigned_t = typename least_unsigned<Value, T...>::type;
+
+template <class T>
+constexpr bool is_serializable_v = std::is_standard_layout_v<T> && std::is_trivially_copyable_v<T>;
+
+
 }}

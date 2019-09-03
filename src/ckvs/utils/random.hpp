@@ -84,4 +84,13 @@ void random_variant(VariantT & var, const size_t max_binary_size, std::default_r
              var);
 }
 
+inline uint64_t fast_thread_local_rand(const uint64_t min, const uint64_t max)
+{
+  thread_local static std::default_random_engine              gen{std::random_device{}()};
+  thread_local static std::uniform_int_distribution<uint64_t> rnd;
+  using range_t = std::uniform_int_distribution<uint64_t>::param_type;
+  return rnd(gen, range_t{min, max});
+}
+
+
 }}

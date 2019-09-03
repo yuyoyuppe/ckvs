@@ -4,6 +4,7 @@
 #include <random>
 #include <string_view>
 #include <cinttypes>
+#include <cstddef>
 #include <chrono>
 
 namespace ckvs { namespace utils {
@@ -56,6 +57,15 @@ double profiled(Func && f, bool one_shot = true, double runtime_in_seconds = 1.)
   }
   return runtime / run_count;
 }
+
+constexpr uint64_t operator"" _magic_sig(const char * s, size_t len)
+{
+  uint64_t result = 0;
+  for(size_t i = 0; i < len; ++i)
+    result |= static_cast<uint64_t>(s[i]) << (8 * i);
+  return result;
+}
+
 }}
 
 #if defined(ASSERTS)
