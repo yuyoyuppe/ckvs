@@ -7,7 +7,8 @@
 
 using test_signature_t = void(const size_t iteration, std::default_random_engine & gen, std::ostream & os);
 
-test_signature_t slotted_page_test, bp_tree_test, lockfree_pool_test, page_cache_test, paged_file_test;
+test_signature_t slotted_page_test, bp_tree_test, lockfree_pool_test, page_cache_test, paged_file_test,
+  flat_numeric_ckvs_test;
 
 struct test_run_params
 {
@@ -23,10 +24,12 @@ const bool dbg =
   false;
 #endif
 
-const test_run_params tests[] = {
-  {bp_tree_test, dbg ? 30 : 40}
-  //,{slotted_page_test, dbg ? 500 : 3000}, {lockfree_pool_test, dbg ? 30 : 1200}, {page_cache_test, dbg ? 500 : 5000}, {paged_file_test, 3}
-};
+const test_run_params tests[] = {{flat_numeric_ckvs_test, 1},
+                                 {bp_tree_test, dbg ? 20 : 40},
+                                 {slotted_page_test, dbg ? 500 : 3000},
+                                 {lockfree_pool_test, dbg ? 30 : 1200},
+                                 {page_cache_test, dbg ? 500 : 5000},
+                                 {paged_file_test, 3}};
 
 using namespace ckvs;
 

@@ -16,7 +16,7 @@ using namespace utils;
 void lockfree_pool_test(const size_t iteration, std::default_random_engine & gen, std::ostream &)
 {
   using elem_t        = std::array<int, 128>;
-  const size_t nPages = std::max(gen() % iteration + 1, 1000ull);
+  const size_t nPages = std::max(gen() % iteration + 1, size_t{1000});
 
   {
     lockfree_pool<elem_t> pool{nPages};

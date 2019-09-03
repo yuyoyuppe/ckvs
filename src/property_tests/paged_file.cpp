@@ -6,6 +6,7 @@
 #include <vector>
 #include <numeric>
 #include <atomic>
+#include <fstream>
 
 #include <paged_file.hpp>
 #include <utils/random.hpp>
@@ -26,7 +27,6 @@ struct page_t
 };
 using page_id_t = uint32_t;
 
-#include <fstream>
 void syntetic_write_measure(const size_t nPages, const char * path, std::default_random_engine & gen, std::ostream & os)
 {
   os << "ofstream completed " << profiled([&] {
@@ -60,15 +60,15 @@ void paged_file_test_for_path(const size_t                 nPages,
   std::vector<uint8_t> char_to_fill_for_thread;
   try
   {
-    std::atomic_size_t page_read_left  = nPages;
-    std::atomic_size_t page_write_left = nPages;
+    std::atomic_uint64_t page_read_left  = nPages;
+    std::atomic_uint64_t page_write_left = nPages;
 
-    const auto read_cb     = [&](const size_t) { --page_read_left; };
-    const auto write_cb    = [&](const size_t) { --page_write_left; };
-    const auto truncate_cb = [&](const size_t new_nPages) { os << "now # " << new_nPages << " pages\n"; };
+    const auto read_cb     = [&](const uint64_t) { --page_read_left; };
+    const auto write_cb    = [&](const uint64_t) { --page_write_left; };
+    const auto truncate_cb = [&](const uint64_t new_nPages) { os << "now # " << new_nPages << " pages\n"; };
 
-    auto   pf              = std::make_unique<paged_file>(path, page_size, read_cb, write_cb, truncate_cb);
-    size_t paged_file_size = paged_file::invalid_size;
+    auto     pf              = std::make_unique<paged_file>(path, page_size, read_cb, write_cb, truncate_cb);
+    uint64_t paged_file_size = paged_file::invalid_size;
     while(paged_file_size == paged_file::invalid_size)
     {
       paged_file_size = pf->size_in_pages();

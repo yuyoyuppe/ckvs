@@ -63,7 +63,7 @@ class bp_tree : Extensions<detail::node<Config>>
   static constexpr size_t  order         = config::order;
   static constexpr index_t node_max_keys = config::node_max_keys;
 
-  //static_assert(std::is_trivially_copyable_v<node_t>, "nodes should be serializable!");
+  static_assert(std::is_trivially_copyable_v<node_t>, "nodes should be serializable!");
 
   // todo: make sure it's threadsafe. also rename to root_handle. also maybe we can
   node_handle_t _root_handle = node_handle_t::invalid();

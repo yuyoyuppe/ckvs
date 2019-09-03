@@ -14,7 +14,7 @@ using pool_t    = lockfree_pool<page_t>;
 
 void page_cache_test(const size_t /*iteration*/, std::default_random_engine & gen, std::ostream & /*os*/)
 {
-  const page_id_t nThreads = std::thread::hardware_concurrency() - 1;
+  const page_id_t nThreads = std::thread::hardware_concurrency();
 
   std::uniform_int_distribution<> nat_gen{1, 9};
   const page_id_t                 page_io_capacity = std::max(nThreads, static_cast<page_id_t>(4 << nat_gen(gen)));

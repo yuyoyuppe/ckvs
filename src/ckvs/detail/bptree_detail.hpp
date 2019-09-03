@@ -12,8 +12,8 @@ enum class node_kind : uint8_t { Internal, Root, Leaf, RootLeaf };
 template <typename NodeHandleT, typename PayloadT>
 union slot
 {
-  // todo!
-  //static_assert(!std::is_pointer_v<NodeT> && !std::is_pointer_v<PayloadT>);
+  // todo: we need to make sure they're serializable and do not depend on sizeof(void*)
+  static_assert(!std::is_pointer_v<NodeHandleT> && !std::is_pointer_v<PayloadT>);
 
   PayloadT    _payload;
   NodeHandleT _child;
@@ -58,10 +58,10 @@ struct node
   key_t     _keys[order - 1];
   slot_t    _slots[order];
 
-  //#if false // Allows catching bugs at compile time, but break is_trivially_copyable :)
+#if false // Allows catching bugs at compile time, but break is_trivially_copyable :)
   node(const node &) = delete;
   node & operator=(const node &) = delete;
-  //#endif
+#endif
 
   node(const node_kind kind) noexcept : _kind{kind}, _nKeys{0} {}
 
@@ -372,10 +372,10 @@ struct ptr_wrap
 {
   T * _ptr;
 
-  bool operator==(const ptr_wrap & rhs) const { return _ptr == rhs._ptr; }
-  bool operator!=(const ptr_wrap & rhs) const { return _ptr != rhs._ptr; }
+  bool operator==(const ptr_wrap rhs) const noexcept { return _ptr == rhs._ptr; }
+  bool operator!=(const ptr_wrap rhs) const noexcept { return _ptr != rhs._ptr; }
 
-  static inline ptr_wrap invalid() { return ptr_wrap{nullptr}; }
+  static inline ptr_wrap invalid() noexcept { return ptr_wrap{nullptr}; }
 };
 
 template <typename NodeT>

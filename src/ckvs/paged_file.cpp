@@ -74,30 +74,37 @@ class paged_file::impl
 
   ring<io_worker_request_t, max_pending_requests, std::mutex> _pending_requests;
 
-  size_t             _page_size;
-  std::atomic_size_t _size_in_pages = paged_file::invalid_size;
+  uint64_t             _page_size;
+  std::atomic_uint64_t _size_in_pages = paged_file::invalid_size;
 
-  llfio::result<file_handle_t::io_state_ptr> io_handle_read_write(file_handle_t &            file_handle,
-                                                                  paged_file::page_request & req,
-                                                                  async_scratch_t &          scratch)
+  template <typename VariantBufferT>
+  inline llfio::result<file_handle_t::io_state_ptr> io_handle_read_write(file_handle_t &            file_handle,
+                                                                         paged_file::page_request & req,
+                                                                         async_scratch_t &          scratch,
+                                                                         VariantBufferT &           buf)
   {
     if(req.is_read_request())
     {
-      file_handle_t::buffer_type dst_buf{req.buffer(), _page_size};
-      return file_handle.async_read(
-        {{dst_buf}, _page_size * req.page_id()}, empty_read_rb, {reinterpret_cast<char *>(&scratch), sizeof(scratch)});
+      using selected_buf_t = file_handle_t::buffer_type;
+      buf                  = selected_buf_t{req.buffer(), _page_size};
+      return file_handle.async_read({{std::get<selected_buf_t>(buf)}, _page_size * req.page_id()},
+                                    empty_read_rb,
+                                    {reinterpret_cast<char *>(&scratch), sizeof(scratch)});
     }
     else
     {
-      file_handle_t::const_buffer_type src_buf{req.buffer(), _page_size};
-      return file_handle.async_write(
-        {{src_buf}, _page_size * req.page_id()}, empty_write_rb, {reinterpret_cast<char *>(&scratch), sizeof(scratch)});
+      using selected_buf_t = file_handle_t::const_buffer_type;
+
+      buf = selected_buf_t{req.buffer(), _page_size};
+      return file_handle.async_write({{std::get<selected_buf_t>(buf)}, _page_size * req.page_id()},
+                                     empty_write_rb,
+                                     {reinterpret_cast<char *>(&scratch), sizeof(scratch)});
     }
   }
 
   void io_handle_truncation(file_handle_t & file_handle, truncation_request & req)
   {
-    const size_t extent = file_handle.maximum_extent().value();
+    const uint64_t extent = file_handle.maximum_extent().value();
     CKVS_ASSERT(static_cast<int64_t>(extent / _page_size) + req._diff_in_pages >= 0);
     llfio::truncate(file_handle, extent + _page_size * req._diff_in_pages).value();
     _size_in_pages = extent / _page_size + req._diff_in_pages;
@@ -111,6 +118,7 @@ public:
     size_t                                                        nRequests       = 0;
     std::array<paged_file::page_request, max_pending_requests>    page_requests;
     std::array<file_handle_t::io_state_ptr, max_pending_requests> async_results;
+    std::array<std::variant<file_handle_t::const_buffer_type, file_handle_t::buffer_type>, max_pending_requests> buffers;
 
     std::array<async_scratch_t, max_pending_requests> scratch;
     llfio::io_service                                 svc;
@@ -173,7 +181,7 @@ public:
           if(async_results[req_idx] != nullptr)
             return;
 
-          auto ret = io_handle_read_write(file_handle, page_requests[req_idx], scratch[req_idx]);
+          auto ret = io_handle_read_write(file_handle, page_requests[req_idx], scratch[req_idx], buffers[req_idx]);
 
           if(!ret.has_error())
           {
@@ -225,7 +233,7 @@ public:
   }
 
   impl(fs::path &&                         absolute_path,
-       const size_t                        page_size,
+       const uint64_t                      page_size,
        page_request::completion_callback_t read_callback,
        page_request::completion_callback_t write_callback,
        truncate_callback_t                 truncate_callback)
@@ -258,11 +266,11 @@ public:
 };
 
 
-bool is_valid_page_size(const size_t page_size) { return page_size % llfio::utils::page_size() == 0; }
+bool is_valid_page_size(const uint64_t page_size) { return page_size % llfio::utils::page_size() == 0; }
 
 
 paged_file::paged_file(fs::path &&                         absolute_path,
-                       const size_t                        page_size,
+                       const uint64_t                      page_size,
                        page_request::completion_callback_t read_callback,
                        page_request::completion_callback_t write_callback,
                        truncate_callback_t                 truncate_callback)
@@ -280,13 +288,13 @@ paged_file::paged_file(fs::path &&                         absolute_path,
                           &default_delete<paged_file::impl>};
 }
 
-size_t paged_file::size_in_pages()
+uint64_t paged_file::size_in_pages()
 {
   _impl->try_rethrow_io_thread_ex();
   return _impl->_size_in_pages;
 }
 
-void paged_file::shrink(const size_t nPages)
+void paged_file::shrink(const uint64_t nPages)
 {
   _impl->try_rethrow_io_thread_ex();
 
@@ -296,7 +304,7 @@ void paged_file::shrink(const size_t nPages)
 }
 
 
-void paged_file::extend(size_t nPages)
+void paged_file::extend(uint64_t nPages)
 {
   _impl->try_rethrow_io_thread_ex();
 
