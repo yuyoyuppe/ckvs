@@ -14,17 +14,19 @@ using namespace ckvs;
 using key_t     = uint32_t;
 using payload_t = uint32_t;
 
-using tree_variant_t = std::variant<bp_tree<bp_tree_config<key_t, payload_t, 4>>,
-                                    bp_tree<bp_tree_config<key_t, payload_t, 6>>,
-                                    bp_tree<bp_tree_config<key_t, payload_t, 34>>,
-                                    bp_tree<bp_tree_config<key_t, payload_t, 70>>,
-                                    bp_tree<bp_tree_config<key_t, payload_t, 128>>,
-                                    bp_tree<bp_tree_config<key_t, payload_t, 1024>>>;
 void bp_tree_test(const size_t iteration, std::default_random_engine & gen, std::ostream & os)
 {
+  using tree_variant_t = std::variant<bp_tree<bp_tree_config<key_t, payload_t, 4>>,
+                                      bp_tree<bp_tree_config<key_t, payload_t, 6>>,
+                                      bp_tree<bp_tree_config<key_t, payload_t, 34>>,
+                                      bp_tree<bp_tree_config<key_t, payload_t, 70>>,
+                                      bp_tree<bp_tree_config<key_t, payload_t, 128>>,
+                                      bp_tree<bp_tree_config<key_t, payload_t, 1024>>>;
+
+  std::optional<payload_t> meh;
+
   tree_variant_t var_tree;
   utils::default_init_variant(var_tree, gen() % std::variant_size_v<tree_variant_t>);
-
   std::visit(
     [&](auto & tree) {
       std::vector<key_t> vals;
@@ -34,11 +36,9 @@ void bp_tree_test(const size_t iteration, std::default_random_engine & gen, std:
         vals[i] = i + step;
       shuffle(begin(vals), end(vals), gen);
       for(const auto val : vals)
-        os << val << ',';
-      os << '\n';
-      for(const auto val : vals)
       {
-        tree.insert(val, val * val);
+        tree.insert(val, payload_t{val * val});
+        tree.inspect(os);
         const auto res = tree.find(val);
         CKVS_ASSERT(res != std::nullopt);
         CKVS_ASSERT(*res == val * val);
@@ -47,19 +47,14 @@ void bp_tree_test(const size_t iteration, std::default_random_engine & gen, std:
       {
         const auto res = tree.find(val);
         CKVS_ASSERT(res != std::nullopt);
-        CKVS_ASSERT(*res == val * val);
+        CKVS_ASSERT(*res == payload_t{val * val});
       }
-
       shuffle(begin(vals), end(vals), gen);
-      for(const auto val : vals)
-        os << val << ',';
-      os << '\n';
       for(size_t i = 0; i < size(vals); ++i)
       {
         tree.remove(vals[i]);
         const auto removed = tree.find(vals[i]);
         CKVS_ASSERT(removed == std::nullopt);
-        os << "after " << vals[i] << " deletion:\n";
         tree.inspect(os);
         for(size_t j = i + 1; j < size(vals); ++j)
         {
@@ -68,6 +63,7 @@ void bp_tree_test(const size_t iteration, std::default_random_engine & gen, std:
           CKVS_ASSERT(*res == vals[j] * vals[j]);
         }
       }
+      tree.delete_node(tree.get_root());
       os << '\n';
     },
     var_tree);

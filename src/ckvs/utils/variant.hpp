@@ -19,6 +19,7 @@ void default_init_variant(std::variant<T...> & v, const size_t alt_idx)
 {
   detail::default_init_variant_detail(v, alt_idx, std::make_index_sequence<sizeof...(T)>{});
 }
+
 template <typename... T>
 std::string_view as_string_view(const std::variant<T...> & var)
 {

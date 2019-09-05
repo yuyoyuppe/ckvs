@@ -1,20 +1,22 @@
 #pragma once
 
 #include <algorithm>
-#include <boost/thread/null_mutex.hpp>
 
 #include "../utils/common.hpp"
+#include "../utils/shared_null_mutex.hpp"
 
 namespace ckvs { namespace detail {
-enum class node_kind : uint8_t { Internal, Root, Leaf, RootLeaf };
+enum class node_kind : uint8_t { Removed, Internal, Root, Leaf, RootLeaf };
 
-// todo: std::aligned_union
 template <typename NodeHandleT, typename PayloadT>
 union slot
 {
   PayloadT    _payload;
   NodeHandleT _child;
 
+  explicit slot(PayloadT v) noexcept : _payload(v) {}
+  explicit slot(NodeHandleT v) noexcept : _child(v) {}
+  slot()                = default;
   inline slot & operator=(NodeHandleT child) noexcept
   {
     _child = child;
@@ -27,19 +29,12 @@ union slot
     return *this;
   }
 
-  explicit slot(PayloadT v) noexcept : _payload(v) {}
-
-  explicit slot(NodeHandleT v) noexcept : _child(v) {}
-
-  slot() = default;
-
   inline bool eq_children(const slot & rhs) const { return _child == rhs._child; }
-
   inline bool eq_payloads(const slot & rhs) const { return _payload == rhs._payload; }
 };
 
 template <typename Config>
-struct node
+struct node : utils::noncopyable
 {
   using config        = Config;
   using index_t       = typename config::index_t;
@@ -55,20 +50,13 @@ struct node
   key_t     _keys[order - 1];
   slot_t    _slots[order];
 
-#if false // Allows catching bugs at compile time, but break is_trivially_copyable :)
-  node(const node &) = delete;
-  node & operator=(const node &) = delete;
-#endif
-
   node(const node_kind kind) noexcept : _kind{kind}, _nKeys{0} {}
 
-  bool has_links() const noexcept { return _kind < node_kind::Leaf; }
-
+  bool has_links() const noexcept { return _kind == node_kind::Root || _kind == node_kind::Internal; }
   bool is_root() const noexcept { return _kind == node_kind::Root || _kind == node_kind::RootLeaf; };
-
   bool safe_for_insert() const noexcept { return _nKeys != config::node_max_keys; };
-
   bool safe_for_remove() const noexcept { return has_enough_slots_with(_nKeys - 1); }
+  bool has_enough_slots() const noexcept { return has_enough_slots_with(_nKeys); }
 
   node_handle_t next_sibling() const noexcept
   {
@@ -82,7 +70,6 @@ struct node
     return nKeys >= config::middle_idx + !has_links() || is_root() && nKeys > 0;
   }
 
-  bool has_enough_slots() const noexcept { return has_enough_slots_with(_nKeys); }
 
   bool can_coalesce_with(const node & sibling) const noexcept
   {
@@ -325,6 +312,7 @@ struct traversal_policy_traits<traverse_policy::insert>
   constexpr static inline traverse_policy policy_if_unsafe = traverse_policy::insert;
 };
 
+// Optimistic policies are currently disabled, since they're highly unstable(crashes!)
 template <>
 struct traversal_policy_traits<traverse_policy::insert_optimistic>
 {
@@ -375,53 +363,126 @@ struct ptr_wrap
   static inline ptr_wrap invalid() noexcept { return ptr_wrap{nullptr}; }
 };
 
-template <typename NodeT, typename NodeHandleT>
-struct default_extentions
+
+template <typename NodeT, typename NodeHandleT, typename LockT>
+struct locked_node_t : utils::noncopyable
 {
-  using node_t        = NodeT;
-  using node_handle_t = NodeHandleT;
+  NodeT *     _node   = nullptr;
+  NodeHandleT _handle = typename NodeHandleT::invalid();
+  LockT       _lock;
+  locked_node_t() noexcept {}
 
-  using r_lock_t        = std::shared_lock<boost::null_mutex>;
-  using w_lock_t        = std::unique_lock<boost::null_mutex>;
-  using r_locked_node_t = std::tuple<node_t &, r_lock_t>;
-  using w_locked_node_t = std::tuple<node_t &, w_lock_t>;
+  locked_node_t(NodeT * node, NodeHandleT handle, LockT && lock) noexcept
+    : _node{node}, _handle{std::move(handle)}, _lock(std::move(lock))
+  {
+  }
+  locked_node_t(locked_node_t &&) = default;
+  locked_node_t & operator=(locked_node_t &&) = default;
+};
 
-  void update_root(const node_handle_t new_root) noexcept { (void)new_root; }
+template <typename RlockedNodeT, typename WlockedNodeT>
+using maybe_locked_node_t = std::variant<std::monostate, RlockedNodeT, WlockedNodeT>;
+
+template <typename RlockedNodeT, typename WlockedNodeT, size_t N>
+using parents_chain_t = std::array<maybe_locked_node_t<RlockedNodeT, WlockedNodeT>, N>;
+
+template <typename RlockedNodeT, typename WlockedNodeT, size_t N>
+struct root_to_leaf_path : utils::noncopyable
+{
+  parents_chain_t<RlockedNodeT, WlockedNodeT, N> _parents;
+  size_t                                         _height;
+};
+
+template <typename RlockedNodeT, typename WlockedNodeT, size_t N>
+struct parents_trace : utils::noncopyable
+{
+  parents_chain_t<RlockedNodeT, WlockedNodeT, N> * _parents;
+  size_t                                           _parent_index;
+
+  parents_trace(parents_chain_t<RlockedNodeT, WlockedNodeT, N> & parents, const size_t parent_index) noexcept
+    : _parents{&parents}, _parent_index{parent_index}
+  {
+  }
+
+  parents_trace next_parent(const bool allow_invalid) noexcept
+  {
+    CKVS_ASSERT(_parent_index != 0 || allow_invalid);
+    return {*_parents, _parent_index - 1};
+  }
+  static parents_trace trace_from_path(root_to_leaf_path<RlockedNodeT, WlockedNodeT, N> & path) noexcept
+  {
+    return {path._parents, path._height - 1};
+  }
+  maybe_locked_node_t<RlockedNodeT, WlockedNodeT> & current_parent() noexcept
+  {
+    CKVS_ASSERT(_parent_index < N);
+    return (*_parents)[_parent_index];
+  }
+};
+
+template <typename Config>
+struct default_bptree_extentions
+{
+  using node_t        = typename Config::node_t;
+  using node_handle_t = typename ptr_wrap<node_t>;
+
+  using r_lock_t        = std::shared_lock<utils::shared_null_mutex>;
+  using w_lock_t        = std::unique_lock<utils::shared_null_mutex>;
+  using r_locked_node_t = locked_node_t<node_t, node_handle_t, r_lock_t>;
+  using w_locked_node_t = locked_node_t<node_t, node_handle_t, w_lock_t>;
   template <bool ExclusivelyLocked>
   using select_locked_node_t = std::conditional_t<ExclusivelyLocked, w_locked_node_t, r_locked_node_t>;
+
+  node_handle_t _root;
+
+  void update_root(const node_handle_t new_root) noexcept { _root = new_root; }
 
   template <bool ExclusivelyLocked>
   select_locked_node_t<ExclusivelyLocked> get_node(const node_handle_t handle) noexcept
   {
-    return {*handle._ptr, r_lock_t{}};
+    select_locked_node_t<ExclusivelyLocked> result;
+    result._node   = handle._ptr;
+    result._handle = node_handle_t{handle._ptr};
+    result._lock   = r_lock_t{};
+    return result;
   }
   template <>
   select_locked_node_t<true> get_node<true>(const node_handle_t handle) noexcept
   {
-    return {*handle._ptr, w_lock_t{}};
+    select_locked_node_t<true> result;
+    result._node   = handle._ptr;
+    result._handle = node_handle_t{handle._ptr};
+    result._lock   = w_lock_t{};
+    return result;
   }
 
-  inline node_t &        get_node_unsafe(const node_handle_t handle) noexcept { return *handle._ptr; }
-  inline w_locked_node_t upgrade_to_node_exclusive(const node_handle_t, r_locked_node_t & locked_node) noexcept
+  inline w_locked_node_t upgrade_to_node_exclusive(const node_handle_t handle, r_locked_node_t & locked_node) noexcept
   {
-    std::shared_lock<boost::null_mutex> shared;
-    return {std::get<node_t &>(locked_node), w_lock_t{}};
+    std::shared_lock<utils::shared_null_mutex> shared;
+    return {std::get<node_t &>(locked_node), handle, w_lock_t{}};
   }
 
-  inline void delete_node(const node_handle_t n) noexcept
-  {
-    static_assert(noexcept(std::declval<node_t>().~node_t()));
-    delete n._ptr;
-  }
+  inline void delete_node(w_locked_node_t & locked_node) noexcept { delete locked_node._handle._ptr; }
+
+  inline void delete_node(const node_handle_t n) noexcept { delete n._ptr; }
 
   template <typename... NodeCtorParams>
-  inline std::tuple<node_handle_t, w_locked_node_t> new_node(NodeCtorParams &&... params) noexcept
+  inline w_locked_node_t new_node(NodeCtorParams &&... params) noexcept
   {
     static_assert(noexcept(node_t(std::forward<NodeCtorParams>(params)...)));
-    auto n = new node_t{std::forward<NodeCtorParams>(params)...}; // Will terminate() on bad_alloc
-    ;
-    return {node_handle_t{n}, w_locked_node_t{*n, w_lock_t{}}};
+    w_locked_node_t result;
+    result._node   = new node_t{std::forward<NodeCtorParams>(params)...}; // Will terminate() on bad_alloc
+    result._handle = node_handle_t{result._node};
+    return result;
   }
+  node_handle_t get_root() noexcept
+  {
+    if(_root == node_handle_t::invalid())
+      _root = new_node(detail::node_kind::RootLeaf)._handle;
+    return _root;
+  }
+
+  inline void mark_dirty(w_locked_node_t &) noexcept {}
 };
 
 

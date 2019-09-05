@@ -4,6 +4,7 @@
 #include <new>
 #include <array>
 #include <mutex>
+#include <queue>
 
 #include "utils/common.hpp"
 #include "utils/traits.hpp"
@@ -15,43 +16,35 @@ struct ring
 {
   using value_t = ValueT;
   using lock_t  = LockT;
-  using index_t = utils::least_unsigned_t<capacity, uint8_t, uint16_t, uint32_t, uint64_t>;
 
-  index_t                           _start_idx = 0;
-  index_t                           _end_idx   = 0;
-  std::array<value_t, capacity + 1> _storage;
+  std::queue<ValueT> _queue;
   alignas(std::hardware_destructive_interference_size) lock_t _lock;
 
 public:
+  ring() {}
   bool empty()
   {
     std::unique_lock<lock_t> lock{_lock};
-    return _end_idx == _start_idx;
+    return _queue.empty();
   }
 
   bool try_push(value_t value)
   {
     std::unique_lock<lock_t> lock{_lock};
-    const index_t            new_end = (_end_idx + 1u) % (capacity + 1u);
-    const bool               is_full = new_end == _start_idx;
+    const bool               is_full = _queue.size() == capacity;
     if(is_full)
       return false;
-    _storage[_end_idx] = std::move(value);
-    _end_idx           = new_end;
+    _queue.push(std::move(value));
     return true;
   }
 
-  // todo: rework to consume_all, which pops all values to callbacks while locking a single time
   bool try_pop(value_t & value)
   {
     std::unique_lock<lock_t> lock{_lock, std::try_to_lock};
-    if(!lock.owns_lock())
+    if(!lock.owns_lock() || _queue.empty())
       return false;
-    if(_end_idx == _start_idx)
-      return false;
-    const index_t new_start = (_start_idx + 1u) % (capacity + 1u);
-    value                   = std::move(_storage[_start_idx]);
-    _start_idx              = new_start;
+    value = std::move(_queue.front());
+    _queue.pop();
     return true;
   }
 };

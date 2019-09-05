@@ -31,8 +31,7 @@ class slotted_storage
   };
 
 public:
-  static_assert(size % 8 == 0);
-  static_assert(size >= 16);
+  static_assert(size % 8 == 0 && size >= 16, "size is not supported!");
 
   using span_t                      = std::string_view;
   static constexpr size_t slot_size = sizeof(slot_description_t);
@@ -159,7 +158,7 @@ public:
 
   void merge_with(slotted_storage & /*other*/) noexcept
   {
-    // todo: figure out how to do overflow first, then this
+    // todo:
     CKVS_ASSERT(false);
   }
 };

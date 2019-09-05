@@ -7,7 +7,7 @@
 #include <array>
 
 namespace ckvs { namespace utils {
-// Packs enum flag values into ptr(48-bit limit ftw), forgets flags on assignment
+// Packs enum flag values into ptr, forgets flags on assignment
 template <typename T, typename Enum, Enum... EnumValues>
 class enum_masked_ptr
 {
@@ -28,6 +28,7 @@ class enum_masked_ptr
     }
     return 0;
   }
+
   static constexpr uintptr_t calc_clear_mask(const size_t nHighestBits)
   {
     uintptr_t mask = 0;
@@ -35,15 +36,20 @@ class enum_masked_ptr
       mask |= nth_highest_bit(i);
     return ~mask;
   }
+
   static inline constexpr uintptr_t clear_mask = calc_clear_mask(sizeof...(EnumValues));
-  static_assert(sizeof...(EnumValues) <= 16);
+
+  static_assert(sizeof(void *) == 8 && sizeof...(EnumValues) <= 16 ||
+                sizeof(void *) == 4 && sizeof...(EnumValues) == 1);
 
   T * cleared() const noexcept { return reinterpret_cast<T *>(_ptr & clear_mask); }
 
 public:
-  enum_masked_ptr(T * ptr) : _ptr{reinterpret_cast<uintptr_t>(ptr)} {}
+  enum_masked_ptr() : _ptr{reinterpret_cast<uintptr_t>(nullptr)} {}
 
-  operator T *() const noexcept { return cleared(); }
+  explicit enum_masked_ptr(T * ptr) : _ptr{reinterpret_cast<uintptr_t>(ptr)} {}
+
+  explicit operator T *() const noexcept { return cleared(); }
 
   operator bool() const noexcept { return cleared() != nullptr; }
 
@@ -79,7 +85,7 @@ public:
     return lhs._ptr != rhs._ptr;
   }
 
-  enum_masked_ptr & operator=(enum_masked_ptr & lhs) = default;
+  enum_masked_ptr & operator=(const enum_masked_ptr & lhs) = default;
 
   inline enum_masked_ptr & operator=(T * ptr) noexcept
   {

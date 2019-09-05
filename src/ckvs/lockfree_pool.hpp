@@ -22,21 +22,11 @@ private:
 
   CapacityT                          _size;
   std::unique_ptr<chunk_t[]>         _chunks;
-  std::unique_ptr<chunk_dispenser_t> _dispenser; // have to wrap in ptr, since boost::stack isn't movable
+  std::unique_ptr<chunk_dispenser_t> _dispenser; // Wrapped in unique, since boost::stack isn't movable
 
 public:
   using value_t    = T;
   using capacity_t = CapacityT;
-
-  CapacityT idx(T * p) const noexcept
-  {
-    auto chunk = reinterpret_cast<chunk_t *>(p);
-    CKVS_ASSERT((reinterpret_cast<uintptr_t>(chunk) % alignof(T)) == 0);
-    CKVS_ASSERT(chunk >= &_chunks[0] && chunk <= &_chunks[_size - 1]);
-    return static_cast<CapacityT>(chunk - &_chunks[0]);
-  }
-
-  capacity_t capacity() const { return _size; }
 
   lockfree_pool(const capacity_t size)
     : _size{size}, _chunks{std::make_unique<chunk_t[]>(size)}, _dispenser{std::make_unique<chunk_dispenser_t>(size)}
@@ -49,14 +39,25 @@ public:
     }
   }
 
-  T * acquire() noexcept
+  CapacityT idx(T * p) const noexcept
+  {
+    auto chunk = reinterpret_cast<chunk_t *>(p);
+    CKVS_ASSERT((reinterpret_cast<uintptr_t>(chunk) % alignof(T)) == 0);
+    CKVS_ASSERT(chunk >= &_chunks[0] && chunk <= &_chunks[_size - 1]);
+    return static_cast<CapacityT>(chunk - &_chunks[0]);
+  }
+
+  capacity_t capacity() const { return _size; }
+
+  template <typename... CtorParams>
+  T * acquire(CtorParams &&... ctor_params) noexcept
   {
     chunk_t * chunk = nullptr;
     if(!_dispenser->pop(chunk))
       return nullptr;
 
     const auto result = reinterpret_cast<T *>(chunk);
-    new(result) T{};
+    new(result) T{std::forward<CtorParams>(ctor_params)...};
     return result;
   }
 

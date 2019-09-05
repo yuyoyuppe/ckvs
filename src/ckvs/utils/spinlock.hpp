@@ -6,7 +6,6 @@
 namespace ckvs { namespace utils {
 class spinlock
 {
-private:
   std::atomic_flag _flag{ATOMIC_FLAG_INIT};
 
 public:

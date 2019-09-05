@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010">
+
+<Type Name="ckvs::utils::enum_masked_ptr&lt;*&gt;">
+<DisplayString>[{"$T1"} ptr, flag {$T3} is {(_ptr &amp; (1ull &lt;&lt; (8 * sizeof(void*) - 1))) != 0}]</DisplayString>
+    <Expand>
+    <Item Name="[ptr]">
+    ($T1*)(_ptr &amp; ~(1ull &lt;&lt; (8 * sizeof(void*) - 1)))
+    </Item>
+    </Expand>
+</Type>
+
+</AutoVisualizer>

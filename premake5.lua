@@ -68,6 +68,7 @@ local function make_common_project_conf(src_path, use_pch)
   for _, src_ext in ipairs(settings.source_extensions) do
     files { src_path .. "**" .. src_ext}
   end
+  files { src_path .. "**.natvis" }
   linkoptions { "-IGNORE:4221" }
   filter "platforms:x86"
     architecture "x86"
@@ -100,11 +101,12 @@ local function make_common_project_conf(src_path, use_pch)
   filter {}
     defines
     {
-      "ASSERTS",
-      -- todo: move to windows only
+      -- "ASSERTS",
+      
+      -- todo: move to msvc only
       "CHECK_LEAKS",
       "_ENABLE_EXTENDED_ALIGNED_STORAGE", -- fix msvc bug 
-      "_CRT_SECURE_NO_WARNINGS", -- we're using stdio.h only in tests, really!
+      "_CRT_SECURE_NO_WARNINGS", 
       "_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS", -- llfio
     }
     disablewarnings 

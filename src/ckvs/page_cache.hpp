@@ -5,6 +5,7 @@
 #include "utils/traits.hpp"
 #include "utils/random.hpp"
 #include "utils/enum_masked_ptr.hpp"
+#include "utils/backoff.hpp"
 
 #include "lockfree_pool.hpp"
 
@@ -20,7 +21,9 @@
 
 namespace ckvs {
 
-template <typename PageT, typename PageIdT, size_t EnableEvictAtCapacityPercents = 90>
+//#define LOGGING
+
+template <typename PageT, typename PageIdT, size_t EnableEvictAtCapacityPercents = 80>
 class page_cache
 {
 public:
@@ -29,31 +32,75 @@ public:
   using r_page_lock_t = std::shared_lock<std::shared_mutex>;
   using w_page_lock_t = std::unique_lock<std::shared_mutex>;
 
-  class shared_page_lock
+  // "lazy" serves as a reminder that it's not RAII friendly => must lock it manually
+  template <typename bool Exclusive>
+  class shared_lazy_page_lock : public utils::noncopyable
   {
-    page_descriptor * _descriptor;
+    enum LockedFlag { Locked };
+    using ptr_and_lock_state_t = utils::enum_masked_ptr<page_descriptor, LockedFlag, LockedFlag::Locked>;
+
+    friend class page_cache;
 
   public:
-    template <typename T>
-    T * get_page_as() noexcept
+    page_cache *         _debug_cache;
+    ptr_and_lock_state_t _descriptor;
+
+    shared_lazy_page_lock() noexcept : _descriptor{nullptr} {}
+
+    shared_lazy_page_lock(page_cache * debug_cache, page_descriptor * descriptor, const bool adopt = false) noexcept
+      : _descriptor{descriptor}, _debug_cache{debug_cache}
     {
-      static_assert(sizeof(T) == sizeof(page_t) && is_serializable_v<T>);
-      return reinterpret_cast<T *>(_descriptor->_raw_page);
+      if(adopt)
+        _descriptor.set<LockedFlag::Locked>();
     }
 
-    shared_page_lock(page_descriptor * descriptor) noexcept : _descriptor{descriptor} {}
-
-    ~shared_page_lock() noexcept
-    {
-      if(!_descriptor)
-        return;
-      _descriptor->_references.fetch_sub(1, std::memory_order_acq_rel);
-    }
-
-    shared_page_lock(shared_page_lock && rhs) noexcept
+    shared_lazy_page_lock(shared_lazy_page_lock && rhs) noexcept
     {
       _descriptor     = rhs._descriptor;
       rhs._descriptor = nullptr;
+      _debug_cache    = rhs._debug_cache;
+    }
+
+    ~shared_lazy_page_lock() noexcept
+    {
+      if(!_descriptor)
+        return;
+      if(_descriptor.is_set<LockedFlag::Locked>())
+      {
+
+        if constexpr(Exclusive)
+          _descriptor->unlock();
+        else
+          _descriptor->unlock_shared();
+      }
+      _descriptor->dec_ref();
+    }
+
+    shared_lazy_page_lock & operator=(shared_lazy_page_lock && rhs) noexcept
+    {
+      if(_descriptor && _descriptor.is_set<LockedFlag::Locked>())
+      {
+        if constexpr(Exclusive)
+          _descriptor->unlock();
+        else
+          _descriptor->unlock_shared();
+        _descriptor->dec_ref();
+      }
+
+      _descriptor     = rhs._descriptor;
+      rhs._descriptor = nullptr;
+      _debug_cache    = rhs._debug_cache;
+      return *this;
+    }
+
+    bool owns_lock() const noexcept { return _descriptor.is_set<LockedFlag::Locked>(); }
+
+    template <typename T>
+    T * get_page_as() noexcept
+    {
+      // uncomment when done tweaking the padding etc.
+      //static_assert(sizeof(T) == sizeof(page_t) && is_serializable_v<T>, "this isn't a valid page type!");
+      return reinterpret_cast<T *>(_descriptor->raw_page());
     }
 
     void pin() noexcept
@@ -86,53 +133,143 @@ public:
       } while(!_descriptor->try_update_flags(flags, new_flags));
     }
 
-    void lock() noexcept
+    // This is possibly a destructive operation, since we either upgrade to exclusive lock, or lose it altogether(to prevent deadlocking)
+    std::optional<shared_lazy_page_lock<true>> upgrade_or_consume() noexcept
     {
-      // We're contending for an exclusive lock with IO-thread's load routine here, so we must yield the lock if
-      // IO thread was too slow to acquire it.
-      size_t nWins_against_io_loader = std::numeric_limits<size_t>::max();
-      auto   flags                   = _descriptor->acquire_flags();
+      CKVS_ASSERT(_descriptor && _descriptor.is_set<LockedFlag::Locked>());
+
+      auto                  flags = _descriptor->acquire_flags();
+      page_descriptor_flags new_flags;
       do
       {
-        if(++nWins_against_io_loader > 0)
+        if(!!(flags & page_descriptor_flags::wants_ugprade_lock))
         {
-          _descriptor->_page_lock.unlock();
-          std::this_thread::yield();
-          _mm_pause();
+          // Self-destruct!
+          *this = shared_lazy_page_lock<false>{};
+          return std::nullopt;
         }
-        _descriptor->_page_lock.lock();
-        auto flags = _descriptor->acquire_flags();
-      } while(!!(flags & page_descriptor_flags::being_loaded));
+        new_flags = flags | page_descriptor_flags::wants_ugprade_lock;
+      } while(!_descriptor->try_update_flags(flags, new_flags));
 
-      CKVS_ASSERT(nWins_against_io_loader < 3); // That means we have to slow harder or use conditional_variable
-      CKVS_ASSERT(!(flags & page_descriptor_flags::being_flushed) && !(flags & page_descriptor_flags::being_loaded));
+      _descriptor->unlock_shared();
+      _descriptor.clear<LockedFlag::Locked>();
+      const bool locked = _descriptor->try_lock();
+      do
+      {
+        new_flags = flags & ~page_descriptor_flags::wants_ugprade_lock;
+      } while(!_descriptor->try_update_flags(flags, new_flags));
+
+      if(!locked)
+      {
+        *this = shared_lazy_page_lock<false>{};
+        return std::nullopt;
+      }
+
+      shared_lazy_page_lock<true> result;
+      result._descriptor  = static_cast<page_descriptor *>(_descriptor);
+      _descriptor         = nullptr;
+      result._debug_cache = _debug_cache;
+      result._descriptor.set<shared_lazy_page_lock<true>::LockedFlag::Locked>();
+      return std::optional<shared_lazy_page_lock<true>>{std::move(result)};
     }
 
-    void unlock() noexcept { _descriptor->_page_lock.unlock(); }
-
-    void unlock_shared() noexcept { _descriptor->_page_lock.unlock_shared(); }
-
-    void lock_shared() noexcept
+    void lock() noexcept
     {
-      // We're contending for a shared lock with IO-thread's flush routine here, so we don't care about it
-      _descriptor->_page_lock.lock_shared();
+      // We're contending for lock with IO-thread's load/flush routine here, so we must yield the lock if
+      // IO thread was too slow to acquire it.
+
+      page_descriptor_flags flags = _descriptor->acquire_flags();
+      utils::backoff<7>     upgrade_backoff;
+      // Everyone waits till the upgrader upgrades!
+      while(!!(flags & page_descriptor_flags::wants_ugprade_lock))
+      {
+        upgrade_backoff();
+        flags = _descriptor->acquire_flags();
+      }
+
+      utils::backoff<5> io_backoff;
+      uint64_t          io_counter = std::numeric_limits<uint64_t>::max();
+      bool              locked     = false;
+      do
+      {
+        if(locked)
+        {
+#if defined(LOGGING)
+          printf("[%zu] lazylock: waiting %s lock on %u. unlocking to give way to io\n",
+                 std::this_thread::get_id(),
+                 (Exclusive ? "excl" : "shared"),
+                 _descriptor->page_id());
+#endif
+          if constexpr(Exclusive)
+            _descriptor->unlock();
+          else
+            _descriptor->unlock_shared();
+        }
+        const size_t very_long_time = 500;
+        if(io_backoff.counter() > very_long_time)
+        {
+          // Start trying to rethrow IO exception
+          _debug_cache->_paged_file.idle();
+#if defined(LOGGING)
+          printf("[%zu] locking %s lazylock of #%u seem to take forever. are we deadlocked. cache at %u/%u?\n",
+                 std::this_thread::get_id(),
+                 (Exclusive ? "excl" : "shared"),
+                 _descriptor->page_id(),
+                 _debug_cache->_size_info._size.load(),
+                 _debug_cache->_capacity);
+#endif
+        }
+        io_counter = io_backoff();
+        if constexpr(Exclusive)
+          locked = _descriptor->try_lock();
+        else
+          locked = _descriptor->try_lock_shared();
+#if defined(LOGGING)
+        printf("[%zu] lazylock: waiting %s lock on %u. %s\n",
+               std::this_thread::get_id(),
+               (Exclusive ? "excl" : "shared"),
+               _descriptor->page_id(),
+               locked ? "just try_locked succesfully" : "couldn't lock");
+#endif
+        flags = _descriptor->acquire_flags();
+      } while(
+        // If the page is being loaded, always give way to IO
+        !!(flags & page_descriptor_flags::being_loaded) || // Or if it's being flushed, we can only get a shared lock
+        (!!(flags & page_descriptor_flags::being_flushed) && Exclusive) || !locked);
+
+      _descriptor.set<LockedFlag::Locked>();
+
+      CKVS_ASSERT((!(flags & page_descriptor_flags::being_flushed) || !Exclusive) &&
+                  !(flags & page_descriptor_flags::being_loaded));
     }
+
+    void unlock() noexcept
+    {
+      _descriptor.clear<LockedFlag::Locked>();
+      if constexpr(Exclusive)
+        _descriptor->unlock();
+      else
+        _descriptor->unlock_shared();
+    }
+
+#if defined(LOGGING)
+    uint32_t page_id() noexcept { return _descriptor->page_id(); }
+#endif
   };
 
   static inline const size_t evict_threshold = EnableEvictAtCapacityPercents;
 
 private:
-  using bucket_t        = detail::bucket<page_descriptor>;
-  using bucket_lock_t   = typename bucket_t::lock_t;
-  using descriptor_iter = typename bucket_t::descriptor_iterator;
+  using bucket_t      = detail::bucket<page_descriptor>;
+  using bucket_lock_t = typename bucket_t::lock_t;
 
-  // don't let those grow past a single cache-line size
+  // Don't let those grow past a single cache-line size
   static_assert(sizeof(bucket_t) == std::hardware_destructive_interference_size);
   static_assert(sizeof(page_descriptor) == std::hardware_destructive_interference_size);
 
   page_id_t                                 _capacity;
-  std::unique_ptr<bucket_t[]>               _buckets;
   lockfree_pool<page_descriptor, page_id_t> _descriptor_pool;
+  std::unique_ptr<bucket_t[]>               _buckets;
   std::unique_ptr<page_t[]>                 _pages;
 
   alignas(std::hardware_destructive_interference_size) struct size_info
@@ -150,9 +287,14 @@ private:
   } _size_info;
   paged_file & _paged_file;
 
-  static bool is_valid_capacity(const page_id_t cap) noexcept { return ((cap & (cap - 1)) == 0) || cap == 0; }
+  static bool is_valid_capacity(const page_id_t cap) noexcept
+  {
+    return ((cap & (cap - 1)) == 0)
+           // boost lockfree stack restriction :<
+           && cap < std::numeric_limits<uint16_t>::max();
+  }
 
-  inline bool nearly_full() noexcept
+  inline bool is_beyond_threshold() noexcept
   {
     return _size_info._size.load(std::memory_order_relaxed) > _size_info._evict_page_threshold;
   }
@@ -165,95 +307,131 @@ private:
     return _buckets[bid];
   }
 
-  void append_page_descriptor(bucket_t & b, page_descriptor & new_desc) noexcept
+  void append_page_descriptor(bucket_t & b, page_descriptor * new_desc) noexcept
   {
-    if(std::empty(b._descriptors))
+    auto it = b._descriptors;
+    if(!it)
     {
-      b._descriptors.push_front(new_desc);
+      b._descriptors = new_desc;
       return;
     }
-
-    auto last = std::begin(b._descriptors);
-    for(auto it = last; it != std::end(b._descriptors); last = ++it)
-      continue;
-
-    b._descriptors.insert_after(last, new_desc);
+    while(it->next() != nullptr)
+      it = it->next();
+    it->set_next(new_desc);
   }
 
-  bool evict_descriptor_or_flush_page(page_descriptor_flags flags, bucket_t & b, descriptor_iter & it) noexcept
+  bool try_request_flush(page_descriptor_flags flags, page_descriptor * it) noexcept
   {
-    // We're currently holding the bucket locket, so no one can add being_[loaded/flushed] or increase ref-count,
+    // We're currently holding the bucket lock, so no one can add being_[loaded/flushed] or increase ref-count,
     // since that requires obtain the bucket lock. The page_descriptor cannot be accessed from paged_file's IO thread
-    // either, since submitted pages have being_[loaded/flushed] flag set. Finally, _references == 0 means it doesn't
-    // have any alive promises.
-#if defined(DEBUG) || true
-    const bool sanity_check = it->_page_lock.try_lock();
-    CKVS_ASSERT(sanity_check);
-    it->_page_lock.unlock();
-#endif
-    CKVS_ASSERT(it->_references == 0);
+    // either, since submitted pages have being_[loaded/flushed] flag set.
     CKVS_ASSERT(!(flags & page_descriptor_flags::being_flushed) || !(flags & page_descriptor_flags::being_loaded));
     CKVS_ASSERT(!(flags & page_descriptor_flags::pinned));
+#if defined(DEBUG) || true
+    const bool sanity_check = it->try_lock_shared();
+    CKVS_ASSERT(sanity_check);
+    it->unlock_shared();
+#endif
 
-    // Since we assume to do evict at this point, we only need to decide whether to evict it instantly or we must flush it first. Notice, that it's possible for someone to get a read-only access during flushing.
+    // Since we assume to evict at this point, we only need to decide whether to evict it instantly or flush it first. Note that it's possible to acquire read-only access during flushing.
     if(!!(flags & page_descriptor_flags::dirty))
     {
+#if defined(LOGGING)
+      printf("cache: req flush #%u %016lx\n", it->page_id(), it);
+#endif
       page_descriptor_flags new_flags;
       do
       {
         new_flags = (flags | page_descriptor_flags::being_flushed) & ~page_descriptor_flags::dirty;
       } while(!it->try_update_flags(flags, new_flags));
-      _paged_file.request(&*it);
-      return false;
+      _paged_file.request(it);
+      return true;
     }
     else
     {
+#if defined(LOGGING)
+      printf("cache: #%u isn't dirty => discard\n", it->page_id());
+#endif
       // Page isn't dirty, so it's safe to free everything
-      it = b._descriptors.erase(it);
-      _descriptor_pool.release(&*it);
-
-      _size_info._size.fetch_sub(1, std::memory_order_relaxed);
-      return true;
+      return false;
     }
   }
 
-  bool try_evict_descriptor(descriptor_iter & it, bucket_t & b) noexcept
+  bool is_evict_possible(const page_descriptor_flags flags) noexcept
   {
-    if(it->_references.load(std::memory_order_acquire) != 0)
-      return false;
+    return !(flags & page_descriptor_flags::pinned) && !(flags & page_descriptor_flags::being_flushed) &&
+           !(flags & page_descriptor_flags::being_loaded);
+  }
 
-    auto flags = it->acquire_flags();
+  page_descriptor * search(bucket_t & b, const page_id_t page_id, const bool try_evict) noexcept
+  {
+    page_descriptor * found = nullptr;
+    page_descriptor * prev  = nullptr;
+    page_descriptor * it    = b._descriptors;
 
-    if(!!(flags & page_descriptor_flags::pinned) || !!(flags & page_descriptor_flags::being_flushed) ||
-       !!(flags & page_descriptor_flags::being_loaded))
-      return false;
-
-    // Mark descriptor as stale, but not evict it yet
-    if(!!(flags & page_descriptor_flags::recently_accessed))
+    while(it != nullptr)
     {
-      page_descriptor_flags new_flags;
-      do
+      // If found the needed descriptor => update LRU state and possibly proceed with evicting
+      if(it->page_id() == page_id && !found)
       {
-        new_flags = flags & ~page_descriptor_flags::recently_accessed;
-      } while(!it->try_update_flags(flags, new_flags));
-      return false;
+        found      = it;
+        auto flags = found->acquire_flags();
+        if(!(flags & page_descriptor_flags::recently_accessed) && !(flags & page_descriptor_flags::pinned))
+        {
+          page_descriptor_flags new_flags;
+          do
+          {
+            new_flags = flags | page_descriptor_flags::recently_accessed;
+          } while(!found->try_update_flags(flags, new_flags));
+        }
+        if(!try_evict)
+          return found;
+      }
+      else if(try_evict)
+      {
+        bool can_evict = !it->referenced();
+        auto flags     = it->acquire_flags();
+        can_evict      = can_evict && is_evict_possible(flags);
+
+        if(!!(flags & page_descriptor_flags::recently_accessed))
+        {
+          page_descriptor_flags new_flags;
+          do
+          {
+            new_flags = flags & ~page_descriptor_flags::recently_accessed;
+          } while(!it->try_update_flags(flags, new_flags));
+          can_evict = false;
+        }
+
+        // If we've made it here, we can start the eviction process:
+        // - request flush page_file if it's dirty
+        // - if not dirty, remove it from the list and return to the pool
+        can_evict = can_evict && !try_request_flush(flags, it);
+        if(can_evict)
+        {
+          auto after_it = it->next();
+          CKVS_ASSERT(after_it != it);
+          if(prev)
+            prev->set_next(after_it);
+#if defined(LOGGING)
+          printf("[%zu] #%u released %016lx \n", std::this_thread::get_id(), it->page_id(), it);
+#endif
+          if(b._descriptors == it)
+            b._descriptors = after_it;
+          _descriptor_pool.release(it);
+          it = after_it;
+          _size_info._size.fetch_sub(1, std::memory_order_relaxed);
+          continue;
+        }
+      }
+      prev = it;
+      it   = it->next();
     }
-
-    return evict_descriptor_or_flush_page(flags, b, it);
+    return found;
   }
-
-  bool try_evict_from_bucket(bucket_t & b) noexcept
-  {
-    for(auto it = std::begin(b._descriptors); it != std::end(b._descriptors); ++it)
-    {
-      if(try_evict_descriptor(it, b))
-        return true;
-    }
-    return false;
-  }
-
   page_descriptor * obtain_new_page_descriptor() noexcept
   {
+    CKVS_ASSERT(_size_info._size.load(std::memory_order_relaxed) <= _capacity);
     page_descriptor * new_descriptor = _descriptor_pool.acquire();
     // We must evict stuff until we can get a new_descriptor
     while(!new_descriptor)
@@ -263,68 +441,47 @@ private:
       std::unique_lock<bucket_lock_t> bucket_lock{_buckets[bucket_id]._bucket_lock, std::try_to_lock};
       if(!bucket_lock.owns_lock())
         continue;
-      if(!try_evict_from_bucket(_buckets[bucket_id]))
-        continue;
+      // Do a fake search in the bucket, possibly freeing descriptors in the process
+      (void)search(_buckets[bucket_id], {}, true);
       new_descriptor = _descriptor_pool.acquire();
     }
     _size_info._size.fetch_add(1, std::memory_order_relaxed);
-
     return new_descriptor;
   }
 
-  descriptor_iter find_page_descriptor(bucket_t & b, const page_id_t page_id) noexcept
-  {
-    const bool      try_evict = nearly_full();
-    descriptor_iter found     = std::end(b._descriptors);
-    for(auto it = std::begin(b._descriptors); it != std::end(b._descriptors); ++it)
-    {
-      // If found the needed descriptor => update LRU state and possibly proceed with evicting
-      if(found == std::end(b._descriptors) && it->_page_id == page_id)
-      {
-        found      = it;
-        auto flags = found->acquire_flags();
-        if(!(flags & page_descriptor_flags::recently_accessed))
-        {
-          page_descriptor_flags new_flags;
-          do
-          {
-            new_flags = flags | page_descriptor_flags::recently_accessed;
-          } while(!found->try_update_flags(flags, new_flags));
-        }
-
-        if(!try_evict)
-          return found;
-      }
-      else if(try_evict)
-        try_evict_descriptor(it, b);
-    }
-    return found;
-  }
-
-  shared_page_lock get_page_shared_mutex(const page_id_t page_id) noexcept
+  template <bool Exclusive>
+  shared_lazy_page_lock<Exclusive> get_page_lock(const page_id_t page_id) noexcept
   {
     auto &           bucket = locate_bucket(page_id);
     std::scoped_lock bucket_lock{bucket._bucket_lock};
 
-    page_descriptor * desc = &*find_page_descriptor(bucket, page_id);
-
+    page_descriptor * desc = search(bucket, page_id, is_beyond_threshold());
     if(!desc)
     {
       desc = obtain_new_page_descriptor();
-      append_page_descriptor(bucket, *desc);
-      desc->_page_id              = page_id;
-      desc->_raw_page             = reinterpret_cast<std::byte *>(locate_page(desc));
+      new(desc) page_descriptor{page_id, reinterpret_cast<std::byte *>(locate_page(desc))};
+#if defined(LOGGING)
+      printf("[%zu] #%u acquired %016lx \n", std::this_thread::get_id(), desc->page_id(), desc);
+#endif
+      append_page_descriptor(bucket, desc);
       page_descriptor_flags flags = desc->acquire_flags();
       page_descriptor_flags new_flags;
       do
       {
         new_flags = flags | page_descriptor_flags::being_loaded;
       } while(!desc->try_update_flags(flags, new_flags));
+#if defined(LOGGING)
+      printf("[%zu] %s get_pagelock: #%u not in cache => setted being_loaded, submitting req to io\n",
+             std::this_thread::get_id(),
+             (Exclusive ? "excl" : "shared"),
+             desc->page_id());
+#endif
+      desc->inc_ref();
       _paged_file.request(desc);
     }
-
-    desc->_references.fetch_add(1, std::memory_order_acq_rel);
-    return {desc};
+    else
+      desc->inc_ref();
+    return {this, desc};
   }
 
 public:
@@ -339,22 +496,46 @@ public:
     , _size_info{0, static_cast<page_id_t>(capacity * static_cast<double>(evict_threshold) / 100.)}
     , _paged_file{paged_file}
   {
-    constexpr size_t align = alignof(page_t);
     // msvc compiler bug: can't figure alignof here.
-    //static_assert(align % paged_file::minimal_required_page_alignment == 0);
-    CKVS_ASSERT(align % paged_file::minimal_required_page_alignment == 0);
+    //static_assert(alignof(page_t) % paged_file::minimal_required_page_alignment == 0);
   }
 
-  void evict_free_page(const page_id_t page_id) noexcept
+  // not thread-safe
+  void shutdown() noexcept
   {
-    auto &           bucket = locate_bucket(page_id);
-    std::scoped_lock bucket_lock{bucket._bucket_lock};
-    descriptor_iter  desc = find_page_descriptor(bucket, page_id);
-    CKVS_ASSERT(desc != std::end(bucket._descriptors));
-    auto flags = desc->acquire_flags();
-    evict_descriptor_or_flush_page(flags, bucket, desc);
+    while(!_paged_file.idle())
+      std::this_thread::sleep_for(std::chrono::milliseconds{10});
+
+#if defined(LOGGING)
+    printf("page cache: shutdown started\n");
+#endif
+    for(size_t bid = 0; bid < _capacity; ++bid)
+    {
+      for(auto it = _buckets[bid]._descriptors; it != nullptr; it = it->next())
+      {
+        page_descriptor_flags flags = it->acquire_flags();
+        page_descriptor_flags new_flags;
+        // We only care about dirty stuff at this point
+        do
+        {
+          new_flags = flags & ~page_descriptor_flags::being_loaded & ~page_descriptor_flags::being_flushed &
+                      ~page_descriptor_flags::pinned & ~page_descriptor_flags::recently_accessed;
+        } while(!it->try_update_flags(flags, new_flags));
+#if defined(LOGGING)
+        printf("page cache cleared flags of %u\n", it->page_id());
+#endif
+      }
+      // Trigger flushing requests
+      (void)search(_buckets[bid], std::numeric_limits<page_id_t>::max(), true);
+    }
+    while(!_paged_file.idle())
+      std::this_thread::sleep_for(std::chrono::milliseconds{10});
   }
 
-  shared_page_lock get_shared_page_lock(const page_id_t page_id) noexcept { return get_page_shared_mutex(page_id); }
+  template <bool Exclusive>
+  shared_lazy_page_lock<Exclusive> get_lazy_page_lock(const page_id_t page_id) noexcept
+  {
+    return get_page_lock<Exclusive>(page_id);
+  }
 };
 }

@@ -7,6 +7,12 @@
 #include <cstddef>
 #include <chrono>
 
+template <typename T>
+struct show_type
+{
+  show_type() { static_assert(sizeof(T) > 2000000); }
+};
+
 namespace ckvs { namespace utils {
 
 struct pinned
@@ -18,6 +24,18 @@ struct pinned
   pinned & operator=(const pinned &) = delete;
   pinned & operator=(pinned &&) = delete;
 };
+
+struct noncopyable
+{
+  noncopyable & operator=(const noncopyable &) = delete;
+  noncopyable(const noncopyable &)             = delete;
+
+  noncopyable() = default;
+
+  noncopyable(noncopyable &&) = default;
+  noncopyable & operator=(noncopyable &&) = default;
+};
+
 
 template <typename... Ts>
 struct overloaded : Ts...
@@ -41,7 +59,7 @@ inline void default_delete(T * p) noexcept
 }
 
 template <typename Func>
-double profiled(Func && f, bool one_shot = true, double runtime_in_seconds = 1.)
+double quick_profile(Func && f, bool one_shot = true, double runtime_in_seconds = 1.)
 {
   int    run_count = 0;
   auto   start     = std::chrono::high_resolution_clock::now();

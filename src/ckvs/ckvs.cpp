@@ -19,6 +19,7 @@ void operator delete(void * p) noexcept { _free_dbg(p, _NORMAL_BLOCK); }
 #endif
 
 // Binary compatibility sanity checks
+static_assert(std::is_same_v<uint8_t, unsigned char>);
 static_assert(sizeof(uint8_t) == alignof(uint8_t));
 static_assert(sizeof(uint16_t) == alignof(uint16_t));
 static_assert(sizeof(uint32_t) == alignof(uint32_t));
