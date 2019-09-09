@@ -16,7 +16,6 @@
 
 
 //#define VERBOSE_INSPECT
-//#define LOGGING
 inline const char * dbg_kind(ckvs::detail::node_kind nk)
 {
   char * types[] = {"Removed", "Internal", "Root", "Leaf", "RootLeaf"};
@@ -148,20 +147,7 @@ class bp_tree : public Extensions<Config>, public utils::noncopyable
 
       const bool removed_node = node._kind == detail::node_kind::Removed;
       if((!path_depth && !node.is_root()) || removed_node)
-      {
-#if defined(LOGGING)
-        if(removed_node)
-          printf("[%zu] traverse started, but I've got %s node! -> again\n",
-                 std::this_thread::get_id(),
-                 dbg_node(locked_node));
-        else
-          printf("[%zu] traverse started, but I have %s instead of root id %u! -> again\n",
-                 std::this_thread::get_id(),
-                 dbg_node(locked_node),
-                 locked_node._handle._id);
-#endif
         goto start;
-      }
       unlock_parents_if_safe(node);
 
       CKVS_ASSERT(node_handle != node_handle_t::invalid());
@@ -207,34 +193,7 @@ class bp_tree : public Extensions<Config>, public utils::noncopyable
         {
           const bool node_is_rootLeaf = node.is_root();
           if(!node_is_rootLeaf && path._height == 0)
-          {
-#if defined(LOGGING)
-            printf(
-              "[%zu] traverse: got %s insteaf of root -> again\n", std::this_thread::get_id(), dbg_node(locked_node));
-#endif
             goto start;
-          }
-#if defined(LOGGING)
-          static char buffer[4096]{};
-          char *      ptr = buffer;
-          ptr += sprintf(buffer,
-                         "[%zu] traverse: returning %s with parents chain:",
-                         std::this_thread::get_id(),
-                         dbg_node(locked_node));
-          for(size_t i = 0; i < path._height; ++i)
-          {
-            const bool empty = std::holds_alternative<std::monostate>(path._parents[i]);
-            if(empty)
-              ptr += sprintf(ptr, " [released] ->");
-            else
-              ptr += sprintf(ptr, " %s ->", dbg_node(std::get<non_leaf_locked_node_t>(path._parents[i])));
-          }
-          ptr += sprintf(ptr, "\n");
-          if(ptr - buffer < 4096)
-            printf(buffer);
-          else
-            printf("buffer too small\n");
-#endif
           result._leaf_handle = locked_node._handle;
           result._locked_leaf = std::move(locked_node);
           result._slot_idx    = leaf_idx;
@@ -312,43 +271,22 @@ class bp_tree : public Extensions<Config>, public utils::noncopyable
                     const slot_t &    value,
                     const index_t     key_idx_hint) noexcept
   {
-#if defined(LOGGING)
-    printf("[%zu] remove_entry: rem %u from %s\n", std::this_thread::get_id(), key, dbg_node(locked_node));
-#endif
     node.remove(key, value, key_idx_hint);
 
     mark_dirty(locked_node);
     if(node.has_enough_slots() || (node.is_root() && !node.has_links()))
     {
-#if defined(LOGGING)
-      printf("[%zu] remove_entry: %s safe after rem -> unlocking\n", std::this_thread::get_id(), dbg_node(locked_node));
-#endif
       return;
     }
 
     const bool node_has_links = node.has_links();
-#if defined(LOGGING)
-    printf("[%zu] remove_entry: %s is unsafe, locking parent...\n", std::this_thread::get_id(), dbg_node(locked_node));
-#endif
-    auto     locked_parent = std::move(std::get<w_locked_node_t>(trace.current_parent()));
-    node_t & parent        = *locked_parent._node;
+    auto       locked_parent  = std::move(std::get<w_locked_node_t>(trace.current_parent()));
+    node_t &   parent         = *locked_parent._node;
     CKVS_ASSERT(parent.has_links());
-#if defined(LOGGING)
-    printf("[%zu] remove_entry: got %s's parent:%s, now locking neighbor...\n",
-           std::this_thread::get_id(),
-           dbg_node(locked_node),
-           dbg_node(locked_parent));
-#endif
     auto [neighbor_handle, parent_idx] = get_neighbor(locked_node_handle, parent);
     CKVS_ASSERT(neighbor_handle != node_handle_t::invalid());
     auto     locked_neighbor = get_node<true>(neighbor_handle);
     node_t & neighbor        = *locked_neighbor._node;
-#if defined(LOGGING)
-    printf("[%zu] remove_entry: got %s's neighbor:%s\n",
-           std::this_thread::get_id(),
-           dbg_node(locked_node),
-           dbg_node(locked_neighbor));
-#endif
     mark_dirty(locked_neighbor);
 
     CKVS_ASSERT(neighbor._kind == node._kind);
@@ -360,12 +298,6 @@ class bp_tree : public Extensions<Config>, public utils::noncopyable
 
     if(node.can_coalesce_with(neighbor))
     {
-#if defined(LOGGING)
-      printf("[%zu] remove_entry: merging %s + %s\n",
-             std::this_thread::get_id(),
-             dbg_node(locked_node),
-             dbg_node(locked_neighbor));
-#endif
       // Always drain from a greater node
 
       node_t * node_p     = &node;
@@ -387,21 +319,12 @@ class bp_tree : public Extensions<Config>, public utils::noncopyable
         auto parent_slot = slot_t{locked_node_handle};
         parent.remove(parent_key, parent_slot, parent_idx);
         neighbor_p->_kind = node.has_links() ? detail::node_kind::Root : detail::node_kind::RootLeaf;
-#if defined(LOGGING)
-        printf("[%zu] remove_entry: updating root to %s\n", std::this_thread::get_id(), dbg_node(locked_neighbor));
-#endif
-        parent._kind = detail::node_kind::Removed;
+        parent._kind      = detail::node_kind::Removed;
         delete_node(locked_parent);
         update_root(neighbor_handle);
       }
       else
       {
-#if defined(LOGGING)
-        printf("[%zu] remove_entry: recursively remove %u from %s\n",
-               std::this_thread::get_id(),
-               parent_key,
-               dbg_node(locked_parent));
-#endif
         remove_entry(parent,
                      locked_parent,
                      locked_parent._handle,
@@ -532,18 +455,9 @@ public:
 
   void insert(const key_t key, const payload_t payload) noexcept
   {
-#if defined(LOGGING)
-    printf("[%zu] begin insert %zu...\n", std::this_thread::get_id(), key);
-#endif
     auto traverse_result = traverse<detail::traverse_policy::insert>(key);
 
     node_t & node = *traverse_result._locked_leaf._node;
-#if defined(LOGGING)
-    printf("[%zu] got locked %s for inserting %zu...\n",
-           std::this_thread::get_id(),
-           dbg_node(traverse_result._locked_leaf),
-           key);
-#endif
     mark_dirty(traverse_result._locked_leaf);
 
     CKVS_ASSERT(!node.has_links());
@@ -551,19 +465,9 @@ public:
 
     if(node.safe_for_insert())
     {
-#if defined(LOGGING)
-      printf("[%zu] safe to insert %zu in %s node. unlocking \n",
-             std::this_thread::get_id(),
-             key,
-             dbg_node(traverse_result._locked_leaf));
-#endif
       node.insert_hinted(key, slot_t{payload}, traverse_result._slot_idx, traverse_result._slot_idx);
       return;
     }
-#if defined(LOGGING)
-    printf(
-      "[%zu] UNSAFE to insert %zu to %s \n", std::this_thread::get_id(), key, dbg_node(traverse_result._locked_leaf));
-#endif
     auto     locked_new_neighbor = new_node(detail::node_kind::Leaf);
     node_t & new_neighbor        = *locked_new_neighbor._node;
     node.distribute_payload(new_neighbor, traverse_result._slot_idx, key, payload);
@@ -584,13 +488,6 @@ public:
 
       node._kind = detail::node_kind::Leaf;
       update_root(locked_new_root._handle);
-#if defined(LOGGING)
-      printf("[%zu] created new root %s to insert %zu and unlocking %s node\n",
-             std::this_thread::get_id(),
-             dbg_node(locked_new_root),
-             key,
-             dbg_node(traverse_result._locked_leaf));
-#endif
       return;
     }
 
@@ -603,23 +500,11 @@ public:
 
   void remove(const key_t key) noexcept
   {
-#if defined(LOGGING)
-    printf("[%zu] remove: begin %u removal\n", std::this_thread::get_id(), key);
-#endif
     auto     traverse_result = traverse<detail::traverse_policy::remove>(key);
     node_t & node            = *traverse_result._locked_leaf._node;
-#if defined(LOGGING)
-    printf("[%zu] remove: got %s\n", std::this_thread::get_id(), dbg_node(traverse_result._locked_leaf));
-#endif
     CKVS_ASSERT(!node.has_links());
     if(key != node._keys[traverse_result._slot_idx])
     {
-#if defined(LOGGING)
-      printf("[%zu] remove: %u isn't there -> unlocking %s\n",
-             std::this_thread::get_id(),
-             key,
-             dbg_node(traverse_result._locked_leaf));
-#endif
       return;
     }
 

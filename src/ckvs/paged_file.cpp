@@ -42,7 +42,6 @@ static inline void empty_write_rb(file_handle_t *, file_handle_t::io_result<file
   CKVS_ASSERT(res.has_value());
 }
 
-//#define LOGGING
 class paged_file::impl
 {
   friend class paged_file;
@@ -88,9 +87,6 @@ class paged_file::impl
     {
       // We are flushing the page, so it's ok to let read it
       desc->lock_shared();
-#if defined(LOGGING)
-      printf("io: flushing requested: #%u\n", desc->page_id());
-#endif
       using selected_buf_t = file_handle_t::const_buffer_type;
       buf                  = selected_buf_t{desc->raw_page(), _page_size};
       llfio::result<file_handle_t::io_state_ptr> result =
@@ -105,9 +101,6 @@ class paged_file::impl
     {
       // There's no valid page data yet, so we must lock exclusive. We don't try&assert, since we're contending with paged shared_lazy_page_lock.lock()
       desc->lock();
-#if defined(LOGGING)
-      printf("io: loading requested: #%u\n", desc->page_id());
-#endif
       using selected_buf_t = file_handle_t::buffer_type;
       buf                  = selected_buf_t{desc->raw_page(), _page_size};
       llfio::result<file_handle_t::io_state_ptr> result =
@@ -182,9 +175,6 @@ class paged_file::impl
           std::visit(overloaded{[&](page_descriptor * desc) {
                                   CKVS_ASSERT(desc->page_id() <= extend_granularity ||
                                               desc->page_id() - extend_granularity < current_size_in_pages);
-#if defined(LOGGING)
-                                  printf("io: got #%u pending req %016lx\n", desc->page_id(), desc);
-#endif
                                   if(is_write_request(desc))
                                     page_requests[nWrite_requests++] = desc;
                                   else
@@ -278,9 +268,6 @@ class paged_file::impl
         } while(!page_requests[i]->try_update_flags(flags, new_flags));
         page_requests[i]->unlock();
         async_results[i] = nullptr;
-#if defined(LOGGING)
-        printf("io: loaded #%u\n", page_requests[i]->page_id());
-#endif
       }
       for(size_t i = 0; i < nWrite_requests; ++i)
       {
@@ -292,9 +279,6 @@ class paged_file::impl
         } while(!page_requests[i]->try_update_flags(flags, new_flags));
         page_requests[i]->unlock_shared();
         async_results[i] = nullptr;
-#if defined(LOGGING)
-        printf("io: flushed #%u\n", page_requests[i]->page_id());
-#endif
       }
       nRequests = nWrite_requests = nRead_requests = 0;
     }
@@ -372,9 +356,6 @@ void paged_file::request(page_descriptor * r)
 {
   while(!_impl->_pending_requests.try_push(r))
     _impl->try_rethrow_io_thread_ex();
-#if defined(LOGGING)
-  printf("[%zu] pushed #%u to io Q\n", std::this_thread::get_id(), r->page_id());
-#endif
   _impl->notify_io_thread();
 }
 

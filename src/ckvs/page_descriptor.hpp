@@ -6,11 +6,6 @@
 
 #include "utils/common.hpp"
 
-#if defined(LOGGING)
-#pragma warning(disable : 4477)
-#pragma warning(disable : 4313)
-#endif
-
 namespace ckvs {
 
 enum class page_descriptor_flags : uint8_t {
@@ -25,7 +20,6 @@ enum class page_descriptor_flags : uint8_t {
   reserved2 = 0x80,
 };
 
-//#define LOGGING
 class alignas(std::hardware_destructive_interference_size) page_descriptor : public utils::noncopyable
 {
   std::atomic_uint16_t _references = 0; // We don't support more than uint16_max simultaneous refs
@@ -56,52 +50,12 @@ public:
   inline std::byte * raw_page() const { return _raw_page; }
   inline uint32_t    page_id() const noexcept { return _page_id; }
 
-  inline bool try_lock_shared()
-  {
-    bool result = _page_lock.try_lock_shared();
-#if defined(LOGGING)
-    if(result)
-      printf("[%zu] shared_locked. #%u\n", std::this_thread::get_id(), _page_id);
-#endif
-    return result;
-  }
-  inline bool try_lock() noexcept
-  {
-    bool result = _page_lock.try_lock();
-#if defined(LOGGING)
-    if(result)
-      printf("[%zu] locked #%u\n", std::this_thread::get_id(), _page_id);
-#endif
-    return result;
-  }
-  inline void lock_shared()
-  {
-#if defined(LOGGING)
-    printf("[%zu] shared_locked #%u\n", std::this_thread::get_id(), _page_id);
-#endif
-    _page_lock.lock_shared();
-  }
-  inline void lock()
-  {
-#if defined(LOGGING)
-    printf("[%zu] locked #%u\n", std::this_thread::get_id(), _page_id);
-#endif
-    _page_lock.lock();
-  }
-  inline void unlock_shared()
-  {
-#if defined(LOGGING)
-    printf("[%zu] shared_unlocked #%u\n", std::this_thread::get_id(), _page_id);
-#endif
-    _page_lock.unlock_shared();
-  }
-  inline void unlock()
-  {
-#if defined(LOGGING)
-    printf("[%zu] unlocked #%u\n", std::this_thread::get_id(), _page_id);
-#endif
-    _page_lock.unlock();
-  }
+  inline bool try_lock_shared() { return _page_lock.try_lock_shared(); }
+  inline bool try_lock() noexcept { return _page_lock.try_lock(); }
+  inline void lock_shared() { _page_lock.lock_shared(); }
+  inline void lock() { _page_lock.lock(); }
+  inline void unlock_shared() { _page_lock.unlock_shared(); }
+  inline void unlock() { _page_lock.unlock(); }
 
   inline page_descriptor_flags acquire_flags()
   {

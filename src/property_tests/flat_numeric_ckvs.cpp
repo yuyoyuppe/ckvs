@@ -20,7 +20,6 @@ using page_id                        = uint32_t;
 const size_t page_align = 4096;
 
 
-//#define LOGGING
 template <typename>
 struct page_handle
 {
@@ -78,9 +77,6 @@ struct alignas(page_align) free_pages_page
     if(_nFree_pages == max_free_pages)
       return false;
     _free_pages[_nFree_pages++] = new_free_page;
-#if defined(LOGGING)
-    printf("[%zu] id %u freed\n", std::this_thread::get_id(), new_free_page);
-#endif
     return true;
   }
 
@@ -89,9 +85,6 @@ struct alignas(page_align) free_pages_page
     if(_nFree_pages == 0)
       return false;
     free_page = _free_pages[--_nFree_pages];
-#if defined(LOGGING)
-    printf("[%zu] id %u now used\n", std::this_thread::get_id(), free_page);
-#endif
     CKVS_ASSERT(free_page % paged_file::extend_granularity != 1);
     return true;
   }
@@ -155,9 +148,6 @@ protected:
     exclusive_index.lock();
     auto index                 = exclusive_index.get_page_as<index_page>();
     index->_bptree_root_handle = new_root._id;
-#if defined(LOGGING)
-    printf("[%zu] update root to id %u \n", std::this_thread::get_id(), new_root._id);
-#endif
   }
 
   template <bool ExclusivelyLocked>
@@ -197,20 +187,11 @@ protected:
 
   inline std::optional<w_locked_node_t> upgrade_to_node_exclusive(r_locked_node_t & locked_node) noexcept
   {
-#if defined(LOGGING)
-    printf("[%zu] trying to upgrade #%u to exclusive!\n", std::this_thread::get_id(), locked_node._handle._id);
-#endif
     std::optional<w_lock_t> maybe_upgraded_lock{locked_node._lock.upgrade_or_consume()};
     if(!maybe_upgraded_lock)
     {
-#if defined(LOGGING)
-      printf("[%zu] self-destructed!!\n", std::this_thread::get_id());
-#endif
       return std::nullopt;
     }
-#if defined(LOGGING)
-    printf("[%zu] upgrade #%u to exclusive OK!!\n", std::this_thread::get_id(), locked_node._handle._id);
-#endif
     w_locked_node_t result;
     result._node   = locked_node._node;
     result._lock   = std::move(*maybe_upgraded_lock);
@@ -245,37 +226,18 @@ protected:
         free_pages_page_id += paged_file::extend_granularity)
     {
       w_lock_t exclusive_free_pages_page{_page_cache.get_lazy_page_lock<true>(free_pages_page_id)};
-#if defined(LOGGING)
-      printf("[%zu] new_node: waiting to lock #%u\n", std::this_thread::get_id(), free_pages_page_id);
-#endif
       exclusive_free_pages_page.lock();
       if(exclusive_free_pages_page.get_page_as<free_pages_page>()->extract_free_page(new_node_handle._id))
       {
-#if defined(LOGGING)
-        printf("[%zu] new_node: extracted #%u from #%u\n",
-               std::this_thread::get_id(),
-               new_node_handle._id,
-               free_pages_page_id);
-#endif
-
         exclusive_free_pages_page.mark_dirty();
         break;
       }
-#if defined(LOGGING)
-      printf("[%zu] new_node: #%u is full, moving to next free_pages_page\n",
-             std::this_thread::get_id(),
-             free_pages_page_id);
-#endif
-
       // Do not unlock previous node, so we can't be outrun
       exclusive_previous_page = std::move(exclusive_free_pages_page);
     }
 
     while(new_node_handle == node_handle_t::invalid())
     {
-#if defined(LOGGING)
-      printf("[%zu] new_node: couldn't find a free node, extending...\n", std::this_thread::get_id());
-#endif
       // We couldn't extract it, so we need to consume unused pages block. That will trigger auto-extend from paged_file, since we're requesting the first 'non-existent' page.
       w_lock_t exclusive_free_pages_page{_page_cache.get_lazy_page_lock<true>(first_unused_page_id)};
       exclusive_free_pages_page.lock();
@@ -284,12 +246,6 @@ protected:
       if(fpp->extract_free_page(new_node_handle._id))
       {
 
-#if defined(LOGGING)
-        printf("[%zu] new_node: created a new free pages page #%u and got #%u for new node\n",
-               std::this_thread::get_id(),
-               first_unused_page_id,
-               new_node_handle._id);
-#endif
         exclusive_free_pages_page.mark_dirty();
         _store_state._first_unused_page_id.fetch_add(paged_file::extend_granularity, std::memory_order_acq_rel);
       }
@@ -389,37 +345,9 @@ public:
     _page_cache.shutdown();
   }
 
-  std::optional<value_t> find(key_t key)
-  {
-#if defined(LOGGING)
-    printf("[%zu] find %u started \n", std::this_thread::get_id(), key);
-#endif
-    auto res = _store.find(key);
-#if defined(LOGGING)
-    printf("[%zu] find %u finished \n", std::this_thread::get_id(), key);
-#endif
-    return res;
-  }
-  void insert(key_t key, value_t value)
-  {
-#if defined(LOGGING)
-    printf("[%zu] insert %u,%u started \n", std::this_thread::get_id(), key, value);
-#endif
-    _store.insert(key, value);
-#if defined(LOGGING)
-    printf("[%zu] insert %u,%u finished \n", std::this_thread::get_id(), key, value);
-#endif
-  }
-  void remove(key_t key)
-  {
-#if defined(LOGGING)
-    printf("[%zu] remove %u started \n", std::this_thread::get_id(), key);
-#endif
-    _store.remove(key);
-#if defined(LOGGING)
-    printf("[%zu] remove %u finished \n", std::this_thread::get_id(), key);
-#endif
-  }
+  std::optional<value_t> find(key_t key) { return _store.find(key); }
+  void                   insert(key_t key, value_t value) { _store.insert(key, value); }
+  void                   remove(key_t key) { _store.remove(key); }
 };
 
 void flat_numeric_ckvs_contention_test(const size_t iteration, std::default_random_engine & gen, std::ostream & os)
@@ -576,25 +504,10 @@ public:
 
   std::optional<value_t> find(key_t key)
   {
-#if defined(LOGGING)
-    printf("[%zu] find %u started \n", std::this_thread::get_id(), key);
-#endif
     auto res = _store.find(key);
-#if defined(LOGGING)
-    printf("[%zu] find %u finished \n", std::this_thread::get_id(), key);
-#endif
     return res;
   }
-  void insert(key_t key, value_t value)
-  {
-#if defined(LOGGING)
-    printf("[%zu] insert %u,%u started \n", std::this_thread::get_id(), key, value);
-#endif
-    _store.insert(key, value);
-#if defined(LOGGING)
-    printf("[%zu] insert %u,%u finished \n", std::this_thread::get_id(), key, value);
-#endif
-  }
+  void insert(key_t key, value_t value) { _store.insert(key, value); }
 };
 
 void slotted_ckvs_test(const size_t /*iteration*/, std::default_random_engine & /*gen*/, std::ostream & /*os*/)
@@ -606,7 +519,7 @@ void slotted_ckvs_test(const size_t /*iteration*/, std::default_random_engine & 
 }
 
 
-void flat_numeric_ckvs_custom_test(const size_t , std::default_random_engine & gen, std::ostream & os)
+void flat_numeric_ckvs_custom_test(const size_t, std::default_random_engine & gen, std::ostream & os)
 {
   const size_t       nThreads = std::thread::hardware_concurrency();
   std::vector<key_t> vals;
@@ -620,7 +533,7 @@ void flat_numeric_ckvs_custom_test(const size_t , std::default_random_engine & g
   std::vector<std::thread> threads;
   {
     std::filesystem::remove(RAM_PAGED_FILE_PATH);
-    
+
     {
       flat_numeric_ckvs_store flat_store{RAM_PAGED_FILE_PATH, page_cache_capacity};
       for(const key_t val : vals)
@@ -628,19 +541,18 @@ void flat_numeric_ckvs_custom_test(const size_t , std::default_random_engine & g
     }
     flat_numeric_ckvs_store flat_store{RAM_PAGED_FILE_PATH, page_cache_capacity, true};
 
-    os << "removed in " << utils::quick_profile([&]{
+    os << "removed in " << utils::quick_profile([&] {
       for(size_t i = 0; i < nThreads; ++i)
       {
         threads.emplace_back([&parts, &flat_store, i]() {
           for(const key_t val : parts[i])
             flat_store.remove(val);
-          });
+        });
         for(auto & t : threads)
           if(t.joinable())
             t.join();
       }
-      }) << " sec\n";
+    }) << " sec\n";
   }
   os << '\n';
 }
-

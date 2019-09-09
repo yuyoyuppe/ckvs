@@ -29,7 +29,7 @@ const test_run_params tests[] = {
   {flat_numeric_ckvs_persistence_test, dbg ? 2 : 5},
   {flat_numeric_ckvs_tiny_order_test, dbg ? 50 : 10},
   {bp_tree_test, dbg ? 10 : 30},
-    //{flat_numeric_ckvs_custom_test, 1},
+  //{flat_numeric_ckvs_custom_test, 1},
   //{slotted_ckvs_test, 1}
 };
 
@@ -51,7 +51,7 @@ int main(int argc, char ** argv)
     seed = std::random_device{}();
   std::ostream   null{nullptr};
   std::ostream & os =
-#if !defined(VERBOSE_TEST) && !defined(LOGGING)
+#if !defined(VERBOSE_TEST)
     null;
 #else
     std::cout;
