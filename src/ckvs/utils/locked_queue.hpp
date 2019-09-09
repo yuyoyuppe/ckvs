@@ -4,15 +4,16 @@
 #include <new>
 #include <array>
 #include <mutex>
-#include <queue>
 
 #include "utils/common.hpp"
 #include "utils/traits.hpp"
 #include "utils/spinlock.hpp"
 
 namespace ckvs {
+namespace utils {
+
 template <typename ValueT, size_t capacity = 1024, typename LockT = utils::spinlock>
-struct ring
+struct bounded_queue
 {
   using value_t = ValueT;
   using lock_t  = LockT;
@@ -21,7 +22,7 @@ struct ring
   alignas(std::hardware_destructive_interference_size) lock_t _lock;
 
 public:
-  ring() {}
+  bounded_queue() {}
   bool empty()
   {
     std::unique_lock<lock_t> lock{_lock};
@@ -48,5 +49,4 @@ public:
     return true;
   }
 };
-
 }

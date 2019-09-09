@@ -1,5 +1,5 @@
 #include "paged_file.hpp"
-#include "ring.hpp"
+#include "bounded_queue.hpp"
 
 #include <condition_variable>
 #include <mutex>
@@ -60,7 +60,7 @@ class paged_file::impl
   bool                    _io_thread_has_work         = false;
   std::condition_variable _io_has_work_signal;
 
-  ring<io_worker_request_t, max_pending_requests, std::mutex> _pending_requests;
+  bounded_queue<io_worker_request_t, max_pending_requests, std::mutex> _pending_requests;
 
   uint64_t _page_size;
   bool     is_write_request(page_descriptor * desc) const noexcept
