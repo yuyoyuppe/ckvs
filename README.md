@@ -1,29 +1,29 @@
 # Building
 Currently the library was tested on Win10 + msvc v142 x64/x86 toolsets
 
-  - `> git clone https://github.com/yuyoyuppe/ckvs/`
-  - `> cd ckvs`
-  - `> git submodule update --init --recursive`
+  - `$ git clone https://github.com/yuyoyuppe/ckvs/`
+  - `$ cd ckvs`
+  - `$ git submodule update --init --recursive`
 
 Note: `<arch>` in the following lists could be `x86` or `x64`.
 ## Windows
 
   - [Get premake5](https://github.com/premake/premake-core/releases/download/v5.0.0-alpha14/premake-5.0.0-alpha14-windows.zip) and add it to your `PATH`
   - Open msvc developer prompt
-  - `> vcpkg install boost:<arch>-windows`
-  - `> premake5 vs2017` // no vs2019 support yet :<
-  - `> cd build`
-  - `> msbuild ckvs.sln /p:Configuration=Release /p:Platform=<arch> /p:PlatformToolset=v142`
-  - `> cd bin_<arch>`
+  - `$ vcpkg install boost:<arch>-windows`
+  - `$ premake5 vs2017` // no vs2019 support yet :<
+  - `$ cd build`
+  - `$ msbuild ckvs.sln /p:Configuration=Release /p:Platform=<arch> /p:PlatformToolset=v142`
+  - `$ cd bin_<arch>`
 
 
 ## Linux
   - [Get premake5](https://github.com/premake/premake-core/releases/download/v5.0.0-alpha14/premake-5.0.0-alpha14-linux.tar.gz) and add it to your `PATH`
   - install boost(aptitude/pacman)
-  - `> premake5 gmake2`
-  - `> cd build`
-  - `> make`
-  - `> cd bin_<arch>`
+  - `$ premake5 gmake2`
+  - `$ cd build`
+  - `$ make`
+  - `$ cd bin_<arch>`
 
 
 Now you can run `property_tests`. Please note that you can change tmp storage paths on different hdd-types.
@@ -94,9 +94,9 @@ Always at 0 offset in the physical file. Pinned in the page cache. Could be part
 magic sig, 4 bytes
    +      
    v      
-+--+-----------------------------------------------------------------+
-| ckvs | name to page id b+-tree root map                               |
-+--------------------------------------------------------------------+
++--+--------------------------------------+
+| ckvs | name to page id b+-tree root map |
++-----------------------------------------+
              ^
              +
 linearized tree of b+-tree roots, <rest of the page> bytes
@@ -244,16 +244,14 @@ $ property_tests.exe
 queried in 658.798 sec
 OK -- 1152.19sec
 ```
-All tests passed.
-```
 
 ## Query 20M from a cold cache, 8 threads, page_cache_capacity = 32768
 ```
 $ property_tests.exe
-Launching property-based testing, seed: 1124209314
 Running test #0 ...
 queried in 80.643 sec
-
 OK -- 121.129sec
-// mixed load tests? 80/20 bigger cache size(remove ?
+```
+
+>todo: more? mixed load tests? 80/20 bigger cache size(relax power of 2 page_cache capacity restriction)?
 
