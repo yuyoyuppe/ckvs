@@ -1,6 +1,7 @@
 #include <page_cache.hpp>
 #include <paged_file.hpp>
 #include <bptree.hpp>
+#include <slotted_storage.hpp>
 
 #include "utils/traits.hpp"
 #include "utils/random.hpp"
@@ -11,6 +12,7 @@
 
 using namespace ckvs;
 using namespace utils;
+
 constexpr size_t page_size           = 4096 * 4;
 constexpr size_t page_cache_capacity = 65536 / 2;
 constexpr size_t bp_tree_order       = 1022;
@@ -19,6 +21,37 @@ using page_id                        = uint32_t;
 
 const size_t page_align = 4096;
 
+#pragma warning(disable : 4309) // "
+
+enum class val_type : uint8_t { Integer, Float, Double, Binary };
+
+using timestamp_t = uint32_t;
+
+struct metadata
+{
+  val_type _key_type : 2;
+  val_type _payload_type : 2;
+  uint8_t  _key_overflow : 1;
+  uint8_t  _payload_overflow : 1;
+  uint8_t  _has_expiration : 1;
+  uint8_t  _removed : 1;
+
+  inline bool has_expiration() const { return _has_expiration != 0; }
+
+  inline bool is_key_small_type() const { return _key_type != val_type::Binary; }
+
+  inline bool is_payload_small_type() const { return _payload_type != val_type::Binary; }
+
+  inline bool is_key_inline() const { return is_key_small_type() && !has_expiration(); }
+
+  inline bool is_payload_inline() const { return is_payload_small_type() && !has_expiration(); }
+
+  inline bool key_has_overflow() const { return _key_overflow != 0; }
+
+  inline bool payload_has_overflow() const { return _payload_overflow != 0; }
+};
+
+static_assert(sizeof(metadata) == sizeof(uint8_t));
 
 template <typename>
 struct page_handle
@@ -94,40 +127,115 @@ static_assert(sizeof(free_pages_page) == page_size);
 struct store_state
 {
   std::atomic<page_id> _first_unused_page_id = paged_file::extend_granularity + 1;
+  paged_file *         _paged_file           = nullptr;
+  page_cache_t *       _page_cache           = nullptr;
 };
 
+template <typename Config>
+struct alignas(page_align) bp_tree_node_page
+{
+  using node_t = typename Config::node_t;
+  node_t                                                                           _node;
+  std::aligned_storage_t<Config::order>                                            _metadata;
+  slotted_storage<page_size - sizeof(_node) - sizeof(_metadata) - alignof(node_t)> _slotted_storage;
+};
+
+template <typename Config, bool IsKey>
 struct slotted_value
 {
-  int              _value;
-  bool             is_view = true;
-  std::string_view _view;
+  using value_t = std::conditional_t<IsKey, typename Config::key_t, typename Config::payload_t>;
+  using page_t  = bp_tree_node_page<Config>;
+  static_assert(sizeof(page_t) == page_size);
 
-  explicit slotted_value(int && value) noexcept : _value(std::move(value)) {}
-  slotted_value()                          = default;
-  slotted_value(const slotted_value & rhs) = default;
-  slotted_value(slotted_value && rhs)      = default;
-  slotted_value & operator=(slotted_value && rhs) = default;
-  slotted_value & operator=(const slotted_value & rhs) = default;
+  value_t _value;
 
-  bool operator==(const int & rhs) const noexcept { return _value == rhs; }
+  slotted_value() = default;
 
-  bool operator==(const slotted_value & rhs) const noexcept { return _value == rhs._value; }
+  slotted_value(value_t value) noexcept : _value{value} {}
 
-  bool operator!=(const slotted_value & rhs) const noexcept { return !(*this == rhs); }
+  inline page_t & my_page() const
+  {
+    return *reinterpret_cast<page_t *>(reinterpret_cast<uintptr_t>(this) & ~(page_align - 1));
+  }
 
-  bool operator<(const slotted_value & rhs) const noexcept { return _value < rhs._value; }
+  inline size_t my_idx() const
+  {
+    if constexpr(IsKey)
+      return reinterpret_cast<uintptr_t>(this) - reinterpret_cast<uintptr_t>(&my_page()._node._keys[0]);
+    else
+      return reinterpret_cast<uintptr_t>(this) - reinterpret_cast<uintptr_t>(&my_page()._node._slots[0]._payload);
+  }
+
+  inline metadata & my_metadata() noexcept { return reinterpret_cast<metadata *>(&my_page()._metadata)[my_idx()]; }
+
+  inline metadata & my_metadata() const { return const_cast<slotted_value *>(this)->my_metadata(); }
+
+  inline value_t * my_value() noexcept
+  {
+    value_t *  v;
+    const bool node_has_links = my_page()._node.has_links();
+    CKVS_ASSERT(IsKey || !node_has_links);
+    const bool has_expiration = !metadata().has_expiration();
+    const bool small_type     = IsKey ? metadata().is_key_small_type() : metadata().is_payload_small_type();
+    if constexpr(IsKey)
+      v = &my_page()._node._keys[my_idx()];
+    else
+      v = &my_page()._node._slots[my_idx()]._payload;
+    // Key is always inlined if it has small type
+    if(small_type && (IsKey || !has_expiration))
+      return v;
+
+    auto timestamp_and_val = my_page()._slotted_storage.get_mut_span(static_cast<uint16_t>(*v));
+    v                      = reinterpret_cast<value_t *>(timestamp_and_val.data() + sizeof(timestamp_t));
+    return v;
+  }
+
+  inline const value_t & my_value() const noexcept { return *const_cast<slotted_value *>(this)->my_value(); }
+
+  inline bool operator==(const slotted_value & rhs) const noexcept
+  {
+    const auto & lhs_md = my_metadata();
+    const auto & rhs_md = rhs.my_metadata();
+    if constexpr(IsKey)
+    {
+      if(lhs_md._key_type != rhs_md._key_type)
+        return false;
+    }
+    else
+    {
+      if(lhs_md._payload_type != rhs_md._payload_type)
+        return false;
+    }
+    // Small key type
+    if(lhs_md.is_key_small_type())
+      return my_value() == rhs.my_value();
+
+    CKVS_ASSERT(false);
+
+    return false;
+  }
+
+  inline bool operator!=(const slotted_value & rhs) const noexcept { return !(*this == rhs); }
+
+  inline bool operator<(const slotted_value & rhs) const noexcept { return my_value() < rhs.my_value(); }
+
+  inline slotted_value & operator=(const slotted_value & rhs)
+  {
+    _value        = rhs._value;
+    my_metadata() = rhs.my_metadata();
+    return *this;
+  }
 };
+
 
 template <typename Config>
 class rw_locked_and_cached_extensions
 {
-  paged_file &                    _paged_file;
-  page_cache_t &                  _page_cache;
   store_state &                   _store_state;
   static constexpr inline page_id index_page_id            = 0;
   static constexpr inline page_id first_free_pages_page_id = 1;
 
-protected:
+public:
   using node_t        = typename Config::node_t;
   using node_handle_t = page_handle<node_t>;
 
@@ -144,7 +252,7 @@ protected:
   {
     CKVS_ASSERT(new_root._id % paged_file::extend_granularity != 1);
 
-    w_lock_t exclusive_index{_page_cache.get_lazy_page_lock<true>(index_page_id)};
+    w_lock_t exclusive_index{_store_state._page_cache->get_lazy_page_lock<true>(index_page_id)};
     exclusive_index.lock();
     auto index                 = exclusive_index.get_page_as<index_page>();
     index->_bptree_root_handle = new_root._id;
@@ -160,7 +268,7 @@ protected:
   {
     CKVS_ASSERT(handle._id < _store_state._first_unused_page_id.load(std::memory_order_acquire));
     CKVS_ASSERT(handle._id % paged_file::extend_granularity != 1);
-    r_lock_t shared_bptree_page{_page_cache.get_lazy_page_lock<false>(handle._id)};
+    r_lock_t shared_bptree_page{_store_state._page_cache->get_lazy_page_lock<false>(handle._id)};
     shared_bptree_page.lock();
     r_locked_node_t result;
     result._node   = shared_bptree_page.get_page_as<node_t>();
@@ -175,7 +283,7 @@ protected:
   {
     CKVS_ASSERT(handle._id < _store_state._first_unused_page_id.load(std::memory_order_acquire));
     CKVS_ASSERT(handle._id % paged_file::extend_granularity != 1);
-    w_lock_t exclusive_bptree_page{_page_cache.get_lazy_page_lock<true>(handle._id)};
+    w_lock_t exclusive_bptree_page{_store_state._page_cache->get_lazy_page_lock<true>(handle._id)};
     exclusive_bptree_page.lock();
     w_locked_node_t result;
     result._node   = exclusive_bptree_page.get_page_as<node_t>();
@@ -205,7 +313,7 @@ protected:
     for(page_id free_pages_page_id = 1; free_pages_page_id < first_unused_page_id;
         free_pages_page_id += paged_file::extend_granularity)
     {
-      w_lock_t exclusive_free_pages_page{_page_cache.get_lazy_page_lock<true>(free_pages_page_id)};
+      w_lock_t exclusive_free_pages_page{_store_state._page_cache->get_lazy_page_lock<true>(free_pages_page_id)};
       exclusive_free_pages_page.lock();
       if(exclusive_free_pages_page.get_page_as<free_pages_page>()->add_free_page(locked_node._handle._id))
       {
@@ -225,7 +333,7 @@ protected:
     for(page_id free_pages_page_id = 1; free_pages_page_id < first_unused_page_id;
         free_pages_page_id += paged_file::extend_granularity)
     {
-      w_lock_t exclusive_free_pages_page{_page_cache.get_lazy_page_lock<true>(free_pages_page_id)};
+      w_lock_t exclusive_free_pages_page{_store_state._page_cache->get_lazy_page_lock<true>(free_pages_page_id)};
       exclusive_free_pages_page.lock();
       if(exclusive_free_pages_page.get_page_as<free_pages_page>()->extract_free_page(new_node_handle._id))
       {
@@ -239,7 +347,7 @@ protected:
     while(new_node_handle == node_handle_t::invalid())
     {
       // We couldn't extract it, so we need to consume unused pages block. That will trigger auto-extend from paged_file, since we're requesting the first 'non-existent' page.
-      w_lock_t exclusive_free_pages_page{_page_cache.get_lazy_page_lock<true>(first_unused_page_id)};
+      w_lock_t exclusive_free_pages_page{_store_state._page_cache->get_lazy_page_lock<true>(first_unused_page_id)};
       exclusive_free_pages_page.lock();
       auto * fpp = exclusive_free_pages_page.get_page_as<free_pages_page>();
       new(fpp) free_pages_page{first_unused_page_id + 1, paged_file::extend_granularity - 1};
@@ -257,7 +365,7 @@ protected:
     }
     if(exclusive_previous_page.owns_lock())
       exclusive_previous_page.unlock();
-    w_lock_t exclusive_bptree_page{_page_cache.get_lazy_page_lock<true>(new_node_handle._id)};
+    w_lock_t exclusive_bptree_page{_store_state._page_cache->get_lazy_page_lock<true>(new_node_handle._id)};
     exclusive_bptree_page.lock();
     exclusive_bptree_page.mark_dirty();
     node_t * raw_node = exclusive_bptree_page.get_page_as<node_t>();
@@ -274,21 +382,16 @@ protected:
 
   node_handle_t get_root() noexcept
   {
-    r_lock_t shared_index{_page_cache.get_lazy_page_lock<false>(index_page_id)};
+    r_lock_t shared_index{_store_state._page_cache->get_lazy_page_lock<false>(index_page_id)};
     shared_index.lock();
     auto index = shared_index.get_page_as<index_page>();
     CKVS_ASSERT(index->_bptree_root_handle % paged_file::extend_granularity != 1);
     return {index->_bptree_root_handle};
   }
 
-
-  rw_locked_and_cached_extensions(paged_file &   paged_file,
-                                  page_cache_t & cache,
-                                  store_state &  store_state,
-                                  const bool     assume_valid)
-    : _page_cache{cache}, _paged_file{paged_file}, _store_state{store_state}
+  rw_locked_and_cached_extensions(store_state & store_state, const bool assume_valid) : _store_state{store_state}
   {
-    auto exclusive_index_page = _page_cache.get_lazy_page_lock<true>(index_page_id);
+    auto exclusive_index_page = _store_state._page_cache->get_lazy_page_lock<true>(index_page_id);
     exclusive_index_page.lock();
     // Never evict index
     exclusive_index_page.pin();
@@ -301,7 +404,8 @@ protected:
       {
         new(index) index_page{};
         {
-          w_lock_t exclusive_first_free_pages_page{_page_cache.get_lazy_page_lock<true>(first_free_pages_page_id)};
+          w_lock_t exclusive_first_free_pages_page{
+            _store_state._page_cache->get_lazy_page_lock<true>(first_free_pages_page_id)};
           exclusive_first_free_pages_page.lock();
           new(exclusive_first_free_pages_page.get_page_as<free_pages_page>())
             free_pages_page{first_free_pages_page_id + 1, paged_file::extend_granularity - 1};
@@ -313,30 +417,26 @@ protected:
   }
 };
 
-using key_t   = uint64_t;
-using value_t = uint64_t;
+using tiny_bp_tree_config_t = bp_tree_config<uint64_t, uint64_t, bp_tree_tiny_order, page_handle>;
+using tiny_store_t          = bp_tree<tiny_bp_tree_config_t, rw_locked_and_cached_extensions>;
 
-using bp_tree_config_t      = bp_tree_config<key_t, value_t, bp_tree_order, page_handle>;
-using tiny_bp_tree_config_t = bp_tree_config<key_t, value_t, bp_tree_tiny_order, page_handle>;
-
-using store_t      = bp_tree<bp_tree_config_t, rw_locked_and_cached_extensions>;
-using tiny_store_t = bp_tree<tiny_bp_tree_config_t, rw_locked_and_cached_extensions>;
-
-template <typename StoreT = store_t>
+template <typename StoreT =
+            bp_tree<bp_tree_config<uint64_t, uint64_t, bp_tree_order, page_handle>, rw_locked_and_cached_extensions>>
 class flat_numeric_ckvs_store
 {
 public:
   page_cache_t _page_cache;
   paged_file   _paged_file;
   store_state  _store_state;
-  store_t      _store;
+  StoreT       _store;
 
 public:
   flat_numeric_ckvs_store(const char * volume_path, const page_id cache_capacity, const bool assume_valid = false)
 
     : _paged_file{volume_path, page_size}
     , _page_cache{cache_capacity, _paged_file}
-    , _store{_paged_file, _page_cache, _store_state, assume_valid}
+    , _store_state{paged_file::extend_granularity + 1, &_paged_file, &_page_cache}
+    , _store{_store_state, assume_valid}
   {
   }
   ~flat_numeric_ckvs_store()
@@ -345,16 +445,16 @@ public:
     _page_cache.shutdown();
   }
 
-  std::optional<value_t> find(key_t key) { return _store.find(key); }
-  void                   insert(key_t key, value_t value) { _store.insert(key, value); }
-  void                   remove(key_t key) { _store.remove(key); }
+  std::optional<typename StoreT::payload_t> find(typename StoreT::key_t key) { return _store.find(key); }
+  void insert(typename StoreT::key_t key, typename StoreT::payload_t value) { _store.insert(key, value); }
+  void remove(typename StoreT::key_t key) { _store.remove(key); }
 };
 
 void flat_numeric_ckvs_contention_test(const size_t iteration, std::default_random_engine & gen, std::ostream & os)
 {
-  const size_t       nThreads = std::min(iteration, static_cast<size_t>(std::thread::hardware_concurrency()));
-  std::vector<key_t> vals;
-  const size_t       nVals = 5'000 * iteration;
+  const size_t          nThreads = std::min(iteration, static_cast<size_t>(std::thread::hardware_concurrency()));
+  std::vector<uint64_t> vals;
+  const size_t          nVals = 5'000 * iteration;
   vals.resize(nVals);
   const unsigned step = gen() % size(vals) + 1u;
   for(unsigned i = 0; i < size(vals); ++i)
@@ -368,7 +468,7 @@ void flat_numeric_ckvs_contention_test(const size_t iteration, std::default_rand
     for(size_t i = 0; i < nThreads; ++i)
     {
       threads.emplace_back([&parts, &flat_store, &os, i]() {
-        for(const key_t val : parts[i])
+        for(const uint64_t val : parts[i])
         {
           flat_store.insert(val, val * val);
           const auto res = flat_store.find(val);
@@ -392,9 +492,9 @@ void flat_numeric_ckvs_contention_test(const size_t iteration, std::default_rand
 
 void flat_numeric_ckvs_persistence_test(const size_t iteration, std::default_random_engine & gen, std::ostream & os)
 {
-  const size_t       nThreads = std::min(iteration, static_cast<size_t>(std::thread::hardware_concurrency()));
-  std::vector<key_t> vals;
-  const size_t       nVals = std::min(page_cache_capacity * bp_tree_order, 5'000 * iteration);
+  const size_t          nThreads = std::min(iteration, static_cast<size_t>(std::thread::hardware_concurrency()));
+  std::vector<uint64_t> vals;
+  const size_t          nVals = std::min(page_cache_capacity * bp_tree_order, 5'000 * iteration);
   vals.resize(nVals);
   const unsigned step = gen() % size(vals) + 1u;
   for(unsigned i = 0; i < size(vals); ++i)
@@ -408,9 +508,9 @@ void flat_numeric_ckvs_persistence_test(const size_t iteration, std::default_ran
     for(size_t i = 0; i < nThreads; ++i)
     {
       threads.emplace_back([&parts, &flat_store, &os, i]() {
-        for(const key_t val : parts[i])
+        for(const uint64_t val : parts[i])
           flat_store.insert(val, val * val);
-        for(const key_t val : parts[i])
+        for(const uint64_t val : parts[i])
           if((val & 1) != 0)
             flat_store.remove(val);
       });
@@ -439,9 +539,9 @@ void flat_numeric_ckvs_persistence_test(const size_t iteration, std::default_ran
 
 void flat_numeric_ckvs_tiny_order_test(const size_t iteration, std::default_random_engine & gen, std::ostream & os)
 {
-  const size_t       nThreads = std::min(iteration, static_cast<size_t>(std::thread::hardware_concurrency()));
-  std::vector<key_t> vals;
-  const size_t       nVals = 1'000 * iteration;
+  const size_t          nThreads = std::min(iteration, static_cast<size_t>(std::thread::hardware_concurrency()));
+  std::vector<uint64_t> vals;
+  const size_t          nVals = 1'000 * iteration;
   vals.resize(nVals);
   const unsigned step = gen() % size(vals) + 1u;
   for(unsigned i = 0; i < size(vals); ++i)
@@ -455,7 +555,7 @@ void flat_numeric_ckvs_tiny_order_test(const size_t iteration, std::default_rand
     for(size_t i = 0; i < nThreads; ++i)
     {
       threads.emplace_back([&parts, &flat_store, &os, i]() {
-        for(const key_t val : parts[i])
+        for(const uint64_t val : parts[i])
         {
           flat_store.insert(val, val * val);
           const auto res = flat_store.find(val);
@@ -477,53 +577,82 @@ void flat_numeric_ckvs_tiny_order_test(const size_t iteration, std::default_rand
   os << '\n';
 }
 
-template <typename StoreT = store_t>
+template <typename TreeT>
 class flat_slotted_ckvs_store
 {
-  // todo: to implement slotted values which could be loaded/saved w/o a (de)-serialization phase,
-  // we need to introduce a new concept in the bptree class - assign proxy, which bptree could
-  // get from a locked_node_t interface. then it performs all operations on _slots/_keys using that assign
-  // proxy. those proxies will hold a slotted_storage(to be able to transfer the actual data between pages)
-  // and kv-store pointer, so they can request a additional pages for overflow.
+  using key_t     = typename TreeT::key_t;
+  using payload_t = typename TreeT::payload_t;
 
 public:
   page_cache_t _page_cache;
   paged_file   _paged_file;
   store_state  _store_state;
-  store_t      _store;
+  TreeT        _tree;
 
 public:
   flat_slotted_ckvs_store(const char * volume_path, const page_id cache_capacity, const bool assume_valid = false)
 
     : _paged_file{volume_path, page_size}
     , _page_cache{cache_capacity, _paged_file}
-    , _store{_paged_file, _page_cache, _store_state, assume_valid}
+    , _store_state{paged_file::extend_granularity + 1, &_paged_file, &_page_cache}
+    , _tree{_store_state, assume_valid}
   {
   }
   ~flat_slotted_ckvs_store() { _page_cache.shutdown(); }
 
-  std::optional<value_t> find(key_t key)
+  std::optional<payload_t> find(key_t key)
   {
-    auto res = _store.find(key);
+    auto res = _tree.find(key);
     return res;
   }
-  void insert(key_t key, value_t value) { _store.insert(key, value); }
+
+  void insert(key_t key, payload_t value) { _tree.insert(key, value); }
 };
 
-void slotted_ckvs_test(const size_t /*iteration*/, std::default_random_engine & /*gen*/, std::ostream & /*os*/)
+void slotted_ckvs_test(const size_t /*iteration*/, std::default_random_engine & /*gen*/, std::ostream & os)
 {
-  using slotted_bp_tree_config_t = bp_tree_config<key_t, slotted_value, 4, page_handle>;
-  using slotted_store_t          = bp_tree<tiny_bp_tree_config_t, rw_locked_and_cached_extensions>;
+  constexpr size_t order = 512;
 
-  flat_slotted_ckvs_store<slotted_store_t> store{RAM_PAGED_FILE_PATH, page_cache_capacity};
+  using fake_config_t = bp_tree_config<uint64_t, uint64_t, order, page_handle>;
+
+  using bp_tree_node_page_t = bp_tree_node_page<fake_config_t>;
+  using slotted_key_t       = slotted_value<fake_config_t, true>;
+  using slotted_payload_t   = slotted_value<fake_config_t, false>;
+
+  static_assert(utils::same_size_and_align_v<slotted_key_t, uint64_t>);
+  static_assert(utils::same_size_and_align_v<slotted_payload_t, uint64_t>);
+
+  using slotted_bp_tree_config_t = bp_tree_config<slotted_key_t, slotted_payload_t, order, page_handle>;
+  using slotted_bptree_t         = bp_tree<slotted_bp_tree_config_t, rw_locked_and_cached_extensions>;
+  using slotted_store_t          = flat_slotted_ckvs_store<slotted_bptree_t>;
+
+  //flat_slotted_ckvs_store<slotted_store_t> store{RAM_PAGED_FILE_PATH, page_cache_capacity};
+  slotted_store_t bpt{RAM_PAGED_FILE_PATH, page_cache_capacity};
+
+  std::vector<std::string> values_storage;
+  constexpr size_t         n_vals = 30;
+  for(size_t i = 0; i < n_vals; ++i)
+  {
+    values_storage.emplace_back(std::to_string(i));
+    //slotted_value sv{true, values_storage.back().data(), values_storage.back().length()};
+    bpt.insert(i + 1, i * i);
+  }
+
+  for(size_t i = 0; i < n_vals; ++i)
+  {
+    const auto v = bpt.find(i);
+    //CKVS_ASSERT(v->as_span() == std::string_view{values_storage[i]});
+  }
+
+  os << '\n';
 }
 
 
 void flat_numeric_ckvs_custom_test(const size_t, std::default_random_engine & gen, std::ostream & os)
 {
-  const size_t       nThreads = std::thread::hardware_concurrency();
-  std::vector<key_t> vals;
-  const size_t       nVals = 5'000'000;
+  const size_t          nThreads = std::thread::hardware_concurrency();
+  std::vector<uint64_t> vals;
+  const size_t          nVals = 5'000'000;
   vals.resize(nVals);
   const unsigned step = gen() % size(vals) + 1u;
   for(unsigned i = 0; i < size(vals); ++i)
@@ -536,7 +665,7 @@ void flat_numeric_ckvs_custom_test(const size_t, std::default_random_engine & ge
 
     {
       flat_numeric_ckvs_store flat_store{RAM_PAGED_FILE_PATH, page_cache_capacity};
-      for(const key_t val : vals)
+      for(const auto val : vals)
         flat_store.insert(val, val * val);
     }
     flat_numeric_ckvs_store flat_store{RAM_PAGED_FILE_PATH, page_cache_capacity, true};
@@ -545,7 +674,7 @@ void flat_numeric_ckvs_custom_test(const size_t, std::default_random_engine & ge
       for(size_t i = 0; i < nThreads; ++i)
       {
         threads.emplace_back([&parts, &flat_store, i]() {
-          for(const key_t val : parts[i])
+          for(const auto val : parts[i])
             flat_store.remove(val);
         });
         for(auto & t : threads)

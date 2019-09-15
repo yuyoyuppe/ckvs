@@ -21,10 +21,12 @@ void default_init_variant(std::variant<T...> & v, const size_t alt_idx)
 }
 
 template <typename... T>
-std::string_view as_string_view(const std::variant<T...> & var)
+span<const char> as_span(const std::variant<T...> & var)
 {
-  return std::visit(overloaded{[](auto && v) { return as_string_view(v); },
-                               [](const std::string & s) -> std::string_view { return {s}; }},
+  return std::visit(overloaded{[](auto && v) { return as_span(v); },
+                               [](const std::string & s) {
+                                 return span<const char>{s.data(), s.length()};
+                               }},
                     var);
 }
 }}

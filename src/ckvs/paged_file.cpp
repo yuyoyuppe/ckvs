@@ -5,10 +5,6 @@
 #include <mutex>
 #include <future>
 
-#define LLFIO_STATIC_LINK
-#define LLFIO_HEADERS_ONLY 1
-#define NTKERNEL_ERROR_CATEGORY_INLINE 0
-#define LLFIO_EXPERIMENTAL_STATUS_CODE 1
 #pragma warning(push) // let the llfio compile in peace
 #pragma warning(disable : 4273)
 #pragma warning(disable : 4005)
@@ -18,9 +14,9 @@
 #include <variant>
 #include <csignal>
 
+
 namespace ckvs {
-namespace fs    = std::filesystem;
-namespace llfio = LLFIO_V2_NAMESPACE;
+namespace fs = std::filesystem;
 using namespace utils;
 
 struct truncation_request

@@ -46,8 +46,10 @@ public:
 template <size_t Value, typename... T>
 using least_unsigned_t = typename least_unsigned<Value, T...>::type;
 
-template <class T>
+template <typename T>
 constexpr bool is_serializable_v = std::is_standard_layout_v<T> && std::is_trivially_copyable_v<T>;
 
+template <typename T1, typename T2>
+constexpr bool same_size_and_align_v = sizeof(T1) == sizeof(T2) && alignof(T1) == alignof(T2);
 
 }}

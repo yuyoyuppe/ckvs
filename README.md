@@ -112,7 +112,7 @@ Free Page Stack Page
 When a new page is required or a cleaned one needs releasing, free page stack pages
 come to an aid! They're located at fixed offsets in the file, specified by the `extend_granularity` setting.
 ```
-number of free page IDs in this page, sizeof(least_unsigned_t<max_pages>) bytes
+number of free page IDs in this page, 4 bytes
    +      
    v      
 +--+--------------------------------------------------+
@@ -125,29 +125,34 @@ number of free page IDs in this page, sizeof(least_unsigned_t<max_pages>) bytes
 
 ### B+-tree Node Page
 ```
-Leaf/Root, 1 byte
-   |   # Keys,     If type bit mask > 10 -> not actual key/value, but a slot #id in 
-                  the slotted storage, else -> actual key/value, order * 8 bytes each
+Leaf/Root/...,
+1 byte             Either "inline" key/payload, or slot #id in the slotted storage. If a KP-pair
+   |   # Keys,     has expiration, then payload is never inlined, order * 8 bytes each
    |   2 bytes     |       | 
    v       v       v       v
-+--+-------+-------+-------+---+
-| Kind | nKeys | Keys | Values | <- serialized node<> struct
-+------------------------------+
++--+-------+-------+-------+-----+
+| Kind | nKeys | Keys | Payloads | <- serialized node<> struct
++--------------------------------+
         +                   /--------------------------slotted storage-----------------------\
         v                   |          2 bytes -v  2 bytes end_offset + 2 bytes size each    |
 +-----------------------------------------------+-------------+--------V---------------------+
-| B+-tree node | node types | slots_end_offset | nUsed slots  | slot descS | slot values     |
+| B+-tree node |  metadata  | slots_end_offset | nUsed slots  | slot descS | slot values     |
 +---------------------+--------------+------------------------+ ------------------+----------+
-  type bit mask, -----^              ^               binary/string slot values ---^          
- 4 bits per key                      |
-  00: uint64             offset from the page end at which to prepend new slot value, 2 bytes
-  01: float
-  10: double
-  11: blob
- 100: string
-101X: overflown string/blob -> value in the slotted page is overflow_page_id + slot_id
-111X: overflown huge string/blob -> value is the Huge Type, value in the storage = huge_page_id
-                                                                                 + size in pages
+ 8 bit metadata, -----^              ^               binary/string slot values ---^          
+  - 2 bits for key type               |_ offset from the page end at which to prepend new slot
+  - 2 bits for payload type              value, 2 bytes
+  - 2 bits indicates key/payload overflow
+  - 1 bit indicates expiration timestamp 
+  - 1 bit reserved // todo: could be used to indicate removed state
+  - possible types: Integer, Float, Double, Binary
+
+- If a key's type != Binary -> stored inline
+- If a payload's type != Binary && doesn't have expiration -> stored inline
+- If a key/payload isn't stored inline, the highest bit indicates whether the value is Huge
+  and the second highest bit indicates whether the value is overflown
+  - If  Huge -> first 4 bytes is overflow_page_id, then 2 bytes for size in # of pages
+  - If !Huge -> first 2 bytes is slot_id. next 4 bytes is PageId if overflown, or unused
+- If payload has expiration, the first 4 bytes of its slot value is a timestamp.
 ```
 
 ### Overflow Page
@@ -158,21 +163,19 @@ Used when the string/binary is smaller than page_size, but can't fit in the embe
 +-----------------------------------------------------------------------------------------------+
 ```
 ### Huge Page
+
 ```
 +---------------------------------------------------------------------------------------------+
 | contiguous binary data, bulk-allocated from the Free Page Stack, so max size                |
 |  of huge binary object = sizeof(page) * (extend_granularity - 1)                            |
 +---------------------------------------------------------------------------------------------+
+Note: First 4 bytes of the First Huge Page contain expiration timestamp as needed
 ```
 
 ### Expiration design 
-
-1. extend type mask to also contain info if the key/value in the slotted storage is also appended by timestamp
-- pros: smaller size overhead when the % of expiring values are small
-- cons: we're *forced* to lazily remove expired values, need GC to compact
-2. separate B+-tree: keys are timestamps, values are *common* keys. 
-- pros: fast traversal from leaf to leaf(since they store next sibling pointer)
-- cons: possibly big overhead on huge keys duplication
+-  minimal size overhead
+-  we're *forced* to lazily remove expired values, need GC to compact 
+- we could also remove expired on merge and set a corresponding flag in metadata
 
 # Perf tests
 - All times are wall clock time.

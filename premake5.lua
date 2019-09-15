@@ -102,6 +102,12 @@ local function make_common_project_conf(src_path, use_pch)
     defines
     {
       -- "ASSERTS",
+
+      "LLFIO_STATIC_LINK",
+      "LLFIO_HEADERS_ONLY=1",
+      "NTKERNEL_ERROR_CATEGORY_INLINE=0",
+      "LLFIO_EXPERIMENTAL_STATUS_CODE=1",
+
       
       -- todo: move to msvc only
       "CHECK_LEAKS",

@@ -1,14 +1,11 @@
 #pragma once
 #include <cinttypes>
-#include <string_view>
 #include <limits>
 #include <type_traits>
-#include <string_view>
 #include <algorithm>
 
 namespace ckvs {
 
-// todo: use smallest possible sizes for description when the rest is stabilized
 template <uint16_t size>
 class slotted_storage
 {
@@ -32,10 +29,10 @@ class slotted_storage
 
 public:
   static_assert(size % 8 == 0 && size >= 16, "size is not supported!");
-
-  using span_t                      = std::string_view;
   static constexpr size_t slot_size = sizeof(slot_description_t);
   using slot_id_t                   = uint16_t;
+  using span_t                      = utils::span<const char>;
+  using mut_span_t                  = utils::span<char>;
 
 private:
   uint16_t  _slot_values_end_offset = 0;
@@ -102,7 +99,13 @@ public:
 
     const auto description = locate_slot_description(slot_id);
     CKVS_ASSERT(description != slot_description_t::invalid());
-    return span_t{slot_ptr(description), description._size};
+    return {slot_ptr(description), description._size};
+  }
+
+  mut_span_t get_mut_span(const slot_id_t slot_id) noexcept
+  {
+    auto mut_span = const_cast<slotted_storage *>(this)->get_span(slot_id);
+    return {const_cast<char *>(mut_span.data()), mut_span.size()};
   }
 
   bool has_space_for(const span_t slot_value) const noexcept
@@ -123,7 +126,7 @@ public:
     const uint16_t value_size = static_cast<uint16_t>(slot_value.size());
     desc->_size               = value_size;
     desc->_offset             = _slot_values_end_offset += value_size;
-    slot_value.copy(slot_ptr(*desc), value_size);
+    std::copy(slot_value.begin(), slot_value.end(), slot_ptr(*desc));
     return slot_id;
   }
 

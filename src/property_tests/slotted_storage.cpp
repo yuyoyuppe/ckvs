@@ -35,13 +35,13 @@ void slotted_page_test(const size_t iteration_n, std::default_random_engine & ge
   for(size_t i = 0; i < size(page_values); ++i)
   {
     random_variant(page_values[i], std::min(max_bin_slot_size, iteration_n), gen);
-    const auto var_view = as_string_view(page_values[i]);
+    const auto var_view = as_span(page_values[i]);
     while(!page.has_space_for(var_view) && !page_values_ids.empty())
     {
       auto it                       = begin(page_values_ids);
       const auto [slot_id, var_ptr] = *it;
       const auto existing_view      = page.get_span(slot_id);
-      CKVS_ASSERT(existing_view == as_string_view(*var_ptr));
+      CKVS_ASSERT(existing_view == as_span(*var_ptr));
       page.remove_slot(slot_id);
       page_values_ids.erase(it);
     }
@@ -54,7 +54,7 @@ void slotted_page_test(const size_t iteration_n, std::default_random_engine & ge
   for(const auto [slot_id, var_ptr] : page_values_ids)
   {
     const auto existing_view = page.get_span(slot_id);
-    CKVS_ASSERT(existing_view == as_string_view(*var_ptr));
+    CKVS_ASSERT(existing_view == as_span(*var_ptr));
     page.remove_slot(slot_id);
   }
   CKVS_ASSERT(page.number_of_slots() == 0);

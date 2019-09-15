@@ -7,6 +7,9 @@
 #include <cstddef>
 #include <chrono>
 
+#include <llfio/v2.0/config.hpp>
+#include <llfio/v2.0/quickcpplib/include/span.hpp>
+
 template <typename T>
 struct show_type
 {
@@ -14,6 +17,10 @@ struct show_type
 };
 
 namespace ckvs { namespace utils {
+
+namespace llfio = LLFIO_V2_NAMESPACE;
+template <typename T>
+using span = llfio::span<T>;
 
 struct pinned
 {
@@ -47,7 +54,7 @@ template <typename... Ts>
 overloaded(Ts...)->overloaded<Ts...>;
 
 template <typename T, typename = std::enable_if_t<std::is_trivially_copyable_v<T>>>
-std::string_view as_string_view(const T & v)
+span<const char> as_span(const T & v)
 {
   return {reinterpret_cast<const char *>(&v), sizeof(T)};
 }

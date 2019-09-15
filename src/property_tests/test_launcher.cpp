@@ -25,9 +25,9 @@ const bool dbg =
 #endif
 
 const test_run_params tests[] = {
-  {flat_numeric_ckvs_contention_test, dbg ? 3 : 7},
-  {flat_numeric_ckvs_persistence_test, dbg ? 2 : 5},
-  {flat_numeric_ckvs_tiny_order_test, dbg ? 50 : 10},
+  //{flat_numeric_ckvs_contention_test, dbg ? 3 : 7},
+  //{flat_numeric_ckvs_persistence_test, dbg ? 2 : 5},
+  //{flat_numeric_ckvs_tiny_order_test, dbg ? 50 : 10},
   {bp_tree_test, dbg ? 10 : 30},
   //{flat_numeric_ckvs_custom_test, 1},
   //{slotted_ckvs_test, 1}
@@ -41,7 +41,7 @@ void signal_handler(int) { std::exit(EXIT_FAILURE); }
 
 int main(int argc, char ** argv)
 {
-  leak_reporter leaks_scope;
+  //leak_reporter leaks_scope;
   std::signal(SIGABRT, signal_handler);
 
   uint32_t seed = 0;

@@ -26,11 +26,11 @@ template <typename T>
 inline const char * dbg_node(T & _locked)
 {
   static char contents_a[2][4096]{};
-  static bool meh      = false;
-  char *      contents = contents_a[meh];
-  meh                  = !meh;
-  auto & node          = *_locked._node;
-  char * ptr           = contents + sprintf(contents, "#%u %s [ ", _locked._handle._id, dbg_kind(node._kind));
+  static bool ar_switch = false;
+  char *      contents  = contents_a[ar_switch];
+  ar_switch             = !ar_switch;
+  auto & node           = *_locked._node;
+  char * ptr            = contents + sprintf(contents, "#%u %s [ ", _locked._handle._id, dbg_kind(node._kind));
   for(size_t i = 0; i < node._nKeys; ++i)
     ptr += sprintf(ptr, "%zu ", node._keys[i]);
   sprintf(ptr, "]");
@@ -70,8 +70,8 @@ struct bp_tree_config
 template <typename Config, template <typename...> typename Extensions = detail::default_bptree_extentions>
 class bp_tree : public Extensions<Config>, public utils::noncopyable
 {
-  using config = Config;
-
+public:
+  using config        = Config;
   using index_t       = typename config::index_t;
   using key_t         = typename config::key_t;
   using payload_t     = typename config::payload_t;
@@ -232,7 +232,7 @@ class bp_tree : public Extensions<Config>, public utils::noncopyable
 
     if(parent.safe_for_insert())
     {
-      parent.insert(key, slot_t{new_neighbor_handle});
+      parent.insert<true>(key, new_neighbor_handle);
       return;
     }
 
@@ -263,15 +263,16 @@ class bp_tree : public Extensions<Config>, public utils::noncopyable
     std::abort();
   }
 
+  template <bool Links, typename ValueT = std::conditional_t<Links, node_handle_t, payload_t>>
   void remove_entry(node_t &          node,
                     w_locked_node_t & locked_node,
                     node_handle_t     locked_node_handle,
                     parents_trace_t   trace,
                     const key_t       key,
-                    const slot_t &    value,
+                    const ValueT &    value,
                     const index_t     key_idx_hint) noexcept
   {
-    node.remove(key, value, key_idx_hint);
+    node.remove<Links>(key, value, key_idx_hint);
 
     mark_dirty(locked_node);
     if(node.has_enough_slots() || (node.is_root() && !node.has_links()))
@@ -279,9 +280,8 @@ class bp_tree : public Extensions<Config>, public utils::noncopyable
       return;
     }
 
-    const bool node_has_links = node.has_links();
-    auto       locked_parent  = std::move(std::get<w_locked_node_t>(trace.current_parent()));
-    node_t &   parent         = *locked_parent._node;
+    auto     locked_parent = std::move(std::get<w_locked_node_t>(trace.current_parent()));
+    node_t & parent        = *locked_parent._node;
     CKVS_ASSERT(parent.has_links());
     auto [neighbor_handle, parent_idx] = get_neighbor(locked_node_handle, parent);
     CKVS_ASSERT(neighbor_handle != node_handle_t::invalid());
@@ -309,15 +309,14 @@ class bp_tree : public Extensions<Config>, public utils::noncopyable
         std::swap(locked_node._handle, locked_neighbor._handle);
       }
 
-      if(node_has_links)
+      if constexpr(Links)
         neighbor_p->_keys[neighbor_p->_nKeys++] = parent_key;
       neighbor_p->drain_from(node_p);
       // Only one child will be left in root => it becomes the new root
       if(parent.is_root() && parent.has_links() && parent._nKeys == 1)
       {
         mark_dirty(locked_parent);
-        auto parent_slot = slot_t{locked_node_handle};
-        parent.remove(parent_key, parent_slot, parent_idx);
+        parent.remove<true>(parent_key, locked_node_handle, parent_idx);
         neighbor_p->_kind = node.has_links() ? detail::node_kind::Root : detail::node_kind::RootLeaf;
         parent._kind      = detail::node_kind::Removed;
         delete_node(locked_parent);
@@ -325,13 +324,13 @@ class bp_tree : public Extensions<Config>, public utils::noncopyable
       }
       else
       {
-        remove_entry(parent,
-                     locked_parent,
-                     locked_parent._handle,
-                     trace.next_parent(parent.is_root()),
-                     parent_key,
-                     slot_t{locked_node_handle},
-                     parent_idx);
+        remove_entry<true>(parent,
+                           locked_parent,
+                           locked_parent._handle,
+                           trace.next_parent(parent.is_root()),
+                           parent_key,
+                           locked_node_handle,
+                           parent_idx);
       }
       node_p->_kind = detail::node_kind::Removed;
       delete_node(locked_node);
@@ -339,10 +338,11 @@ class bp_tree : public Extensions<Config>, public utils::noncopyable
     }
 
     // Can't coalesce => steal KV-pair from the neighbor
-    const auto new_sparse_key = node_is_leftmost ? node.steal_smallest(neighbor) : node.steal_greatest(neighbor);
+    const auto new_sparse_key =
+      node_is_leftmost ? node.steal_smallest<Links>(neighbor) : node.steal_greatest<Links>(neighbor);
 
     // Use parents' sparse key
-    if(node_has_links)
+    if constexpr(Links)
       node._keys[node_is_leftmost ? node._nKeys - 1 : 0] = parent_key;
 
     CKVS_ASSERT(node._nKeys > 0);
@@ -465,7 +465,7 @@ public:
 
     if(node.safe_for_insert())
     {
-      node.insert_hinted(key, slot_t{payload}, traverse_result._slot_idx, traverse_result._slot_idx);
+      node.insert_hinted<false>(key, payload, traverse_result._slot_idx, traverse_result._slot_idx);
       return;
     }
     auto     locked_new_neighbor = new_node(detail::node_kind::Leaf);
@@ -473,9 +473,9 @@ public:
     node.distribute_payload(new_neighbor, traverse_result._slot_idx, key, payload);
     mark_dirty(locked_new_neighbor);
 
-    new_neighbor._slots[node_max_keys] = node._slots[node_max_keys];
-    node._slots[node_max_keys]         = locked_new_neighbor._handle;
-    const key_t sparse_key             = new_neighbor._keys[0];
+    new_neighbor._slots[node_max_keys]._payload = node._slots[node_max_keys]._payload;
+    node._slots[node_max_keys]                  = locked_new_neighbor._handle;
+    const key_t sparse_key                      = new_neighbor._keys[0];
 
     if(node.is_root() && !node.has_links())
     {
@@ -508,13 +508,13 @@ public:
       return;
     }
 
-    remove_entry(*traverse_result._locked_leaf._node,
-                 traverse_result._locked_leaf,
-                 traverse_result._leaf_handle,
-                 parents_trace_t::trace_from_path(traverse_result._path),
-                 key,
-                 node._slots[traverse_result._slot_idx],
-                 traverse_result._slot_idx);
+    remove_entry<false>(*traverse_result._locked_leaf._node,
+                        traverse_result._locked_leaf,
+                        traverse_result._leaf_handle,
+                        parents_trace_t::trace_from_path(traverse_result._path),
+                        key,
+                        node._slots[traverse_result._slot_idx]._payload,
+                        traverse_result._slot_idx);
   }
 
   std::optional<payload_t> find(const key_t key) noexcept

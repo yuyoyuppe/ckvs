@@ -28,9 +28,11 @@ union slot
     _payload = payload;
     return *this;
   }
+  //inline bool operator==(const PayloadT & rhs) const { return _payload == rhs; }
+  //inline bool operator==(const NodeHandleT & rhs) const { return _child == rhs; }
 
-  inline bool eq_children(const slot & rhs) const { return _child == rhs._child; }
-  inline bool eq_payloads(const slot & rhs) const { return _payload == rhs._payload; }
+  inline bool eq_children(const NodeHandleT & rhs) const { return _child == rhs; }
+  inline bool eq_payloads(const PayloadT & rhs) const { return _payload == rhs; }
 };
 
 template <typename Config>
@@ -82,7 +84,7 @@ struct node : utils::noncopyable
                            const key_t     new_key,
                            const payload_t new_value) noexcept
   {
-    CKVS_ASSERT(has_links() == greater_dst.has_links());
+    CKVS_ASSERT(!has_links() && !greater_dst.has_links());
 
     _nKeys = greater_dst._nKeys = order / 2;
 
@@ -97,17 +99,30 @@ struct node : utils::noncopyable
       greater_dst._keys[idx - split_start_idx] = new_key;
       std::copy(_keys + idx, _keys + config::node_max_keys, greater_dst._keys + 1 + (idx - split_start_idx));
 
-      std::copy(_slots + split_start_idx, _slots + idx, greater_dst._slots);
-      greater_dst._slots[idx - split_start_idx] = new_value;
-      std::copy(_slots + idx, _slots + config::node_max_keys + 1, greater_dst._slots + 1 + (idx - split_start_idx));
+      size_t dst_idx = 0;
+      size_t src_idx = split_start_idx;
+      while(src_idx != idx)
+        _slots[dst_idx++]._payload = _slots[src_idx++]._payload;
+
+      greater_dst._slots[idx - split_start_idx]._payload = new_value;
+
+      src_idx = idx;
+      dst_idx = 1 + idx - split_start_idx;
+      while(src_idx != config::node_max_keys + 1)
+        _slots[dst_idx++]._payload = _slots[src_idx++]._payload;
     }
-    // Otherwise, just copy the greater half + the biggest KV from our half, since we must remove it to create
-    // place for the new KV.
+    // Otherwise, just copy the greater half + the biggest KV from our half, since we must remove it to
+    // create a place for the new KV.
     else
     {
       sparse_key = _keys[config::middle_idx];
       std::copy(_keys + config::middle_idx, _keys + config::node_max_keys, greater_dst._keys);
-      std::copy(_slots + config::middle_idx, _slots + config::node_max_keys + 1, greater_dst._slots);
+
+      size_t dst_idx = 0;
+      size_t src_idx = config::middle_idx;
+      while(src_idx != config::node_max_keys + 1)
+        _slots[dst_idx++]._payload = _slots[src_idx++]._payload;
+
       if(idx == config::middle_idx)
       {
         _keys[idx]  = new_key;
@@ -116,7 +131,7 @@ struct node : utils::noncopyable
       else
       {
         --_nKeys;
-        insert_hinted(new_key, slot_t{new_value}, idx, idx);
+        insert_hinted<false>(new_key, new_value, idx, idx);
       }
     }
     return sparse_key;
@@ -166,8 +181,8 @@ struct node : utils::noncopyable
     if(insert_here)
     {
       const index_t max_key_idx = _nKeys - 1;
-      remove(_keys[max_key_idx], _slots[_nKeys], max_key_idx);
-      insert_hinted(new_key, slot_t{new_right_child}, insert_idx, insert_idx + 1);
+      remove<true>(_keys[max_key_idx], _slots[_nKeys]._child, max_key_idx);
+      insert_hinted<true>(new_key, new_right_child, insert_idx, insert_idx + 1);
     }
 
     return sparse_key;
@@ -178,50 +193,78 @@ struct node : utils::noncopyable
     return static_cast<index_t>(std::upper_bound(_keys, _keys + _nKeys, key) - _keys);
   }
 
-  void insert_detail(const key_t key, const slot_t & slot_value, const index_t key_idx, const index_t value_idx) noexcept
+  template <bool Links, typename ValueT = std::conditional_t<Links, node_handle_t, payload_t>>
+  void insert_detail(const key_t key, const ValueT & slot_value, const index_t key_idx, const index_t value_idx) noexcept
   {
-    const bool links = has_links();
-
-    CKVS_ASSERT(links ? _nKeys <= config::node_max_keys : _nKeys < config::node_max_keys);
+    CKVS_ASSERT(Links == has_links());
+    CKVS_ASSERT(Links ? _nKeys <= config::node_max_keys : _nKeys < config::node_max_keys);
 
     std::copy_backward(_keys + key_idx, _keys + _nKeys, _keys + _nKeys + 1);
     _keys[key_idx] = key;
 
-    std::copy_backward(_slots + value_idx, _slots + _nKeys + links, _slots + _nKeys + 1 + links);
-    _slots[value_idx] = slot_value;
+    size_t dst_idx = _nKeys + 1 + Links;
+    size_t src_idx = _nKeys + Links;
+    if constexpr(Links)
+      while(src_idx != value_idx)
+        _slots[--dst_idx]._child = _slots[--src_idx]._child;
+    else
+      while(src_idx != value_idx)
+        _slots[--dst_idx]._payload = _slots[--src_idx]._payload;
 
+    if constexpr(Links)
+      _slots[value_idx]._child = slot_value;
+    else
+      _slots[value_idx]._payload = slot_value;
     ++_nKeys;
   }
-
+  template <bool Links, typename ValueT = std::conditional_t<Links, node_handle_t, payload_t>>
   void insert_hinted(const key_t    key,
-                     const slot_t & slot_value,
+                     const ValueT & slot_value,
                      const index_t  key_idx_hint,
                      const index_t  value_idx_hint) noexcept
   {
-    insert_detail(key, slot_value, key_idx_hint, value_idx_hint);
+    insert_detail<Links>(key, slot_value, key_idx_hint, value_idx_hint);
   }
 
-  void insert(const key_t key, const slot_t & slot_value) noexcept
+  template <bool Links, typename ValueT = std::conditional_t<Links, node_handle_t, payload_t>>
+  void insert(const key_t key, const ValueT & slot_value) noexcept
   {
     const index_t key_idx = find_key_index(key);
-    insert_detail(key, slot_value, key_idx, key_idx + 1);
+    insert_detail<Links>(key, slot_value, key_idx, key_idx + 1);
   }
 
-  void remove(const key_t key, const slot_t & slot_value, index_t key_idx_hint) noexcept
+  template <bool Links, typename ValueT = std::conditional_t<Links, node_handle_t, payload_t>>
+  void remove(const key_t key, const ValueT & slot_value, index_t key_idx_hint) noexcept
   {
-    CKVS_ASSERT(key_idx_hint - has_links() < _nKeys);
+    CKVS_ASSERT(Links == has_links());
+    CKVS_ASSERT(key_idx_hint - Links < _nKeys);
 
     if(_keys[key_idx_hint] != key)
       key_idx_hint = find_key_index(key);
 
     std::copy(_keys + key_idx_hint + 1, _keys + _nKeys, _keys + key_idx_hint);
 
-    const bool hint_correct =
-      has_links() ? _slots[key_idx_hint].eq_children(slot_value) : _slots[key_idx_hint].eq_payloads(slot_value);
+    bool hint_correct;
+    if constexpr(Links)
+      hint_correct = _slots[key_idx_hint].eq_children(slot_value);
+    else
+      hint_correct = _slots[key_idx_hint].eq_payloads(slot_value);
     const index_t slot_idx = hint_correct ? key_idx_hint : key_idx_hint + 1;
-    CKVS_ASSERT(has_links() ? _slots[slot_idx].eq_children(slot_value) : _slots[key_idx_hint].eq_payloads(slot_value));
+    if constexpr(Links)
+      CKVS_ASSERT(_slots[slot_idx]._child == slot_value);
+    else
+      CKVS_ASSERT(_slots[key_idx_hint]._payload == slot_value);
 
-    std::copy(_slots + slot_idx + 1, _slots + _nKeys + 1, _slots + slot_idx);
+    size_t dst_idx = slot_idx;
+    size_t src_idx = slot_idx + 1;
+
+    if constexpr(Links)
+      while(src_idx != _nKeys + 1)
+        _slots[dst_idx++]._child = _slots[src_idx++]._child;
+    else
+      while(src_idx != _nKeys + 1)
+        _slots[dst_idx++]._payload = _slots[src_idx++]._payload;
+
     --_nKeys;
   }
 
@@ -249,31 +292,47 @@ struct node : utils::noncopyable
     _slots[config::node_max_keys]._child = greater_partial_node->_slots[config::node_max_keys]._child;
   }
 
+  template <bool Links>
   key_t steal_smallest(node & greater_node) noexcept
   {
+    CKVS_ASSERT(Links == has_links());
     const index_t slot_idx = 0;
     const index_t key_idx  = 0;
 
-    const auto  stolen_slot = greater_node._slots[slot_idx];
-    const auto  stolen_key  = greater_node._keys[key_idx];
-    const key_t sparse_key  = greater_node._keys[!has_links()];
-    greater_node.remove(stolen_key, stolen_slot, key_idx);
+    const auto & stolen_slot = greater_node._slots[slot_idx];
+    const auto   stolen_key  = greater_node._keys[key_idx];
+    const key_t  sparse_key  = greater_node._keys[!Links];
+    if constexpr(Links)
+      greater_node.remove<Links>(stolen_key, stolen_slot._child, key_idx);
+    else
+      greater_node.remove<Links>(stolen_key, stolen_slot._payload, key_idx);
 
-    const index_t value_idx_hint = _nKeys + has_links();
-    insert_hinted(stolen_key, stolen_slot, _nKeys, value_idx_hint);
-
+    const index_t value_idx_hint = _nKeys + Links;
+    if constexpr(Links)
+      insert_hinted<Links>(stolen_key, stolen_slot._child, _nKeys, value_idx_hint);
+    else
+      insert_hinted<Links>(stolen_key, stolen_slot._payload, _nKeys, value_idx_hint);
     return sparse_key;
   }
 
+  template <bool Links>
   key_t steal_greatest(node & lesser_node) noexcept
   {
-    const index_t slot_idx = lesser_node._nKeys - !has_links();
+    CKVS_ASSERT(Links == has_links());
+    const index_t slot_idx = lesser_node._nKeys - !Links;
     const index_t key_idx  = lesser_node._nKeys - 1;
 
-    const auto stolen_slot = lesser_node._slots[slot_idx];
-    const auto stolen_key  = lesser_node._keys[key_idx];
-    lesser_node.remove(stolen_key, stolen_slot, key_idx);
-    insert_hinted(stolen_key, stolen_slot, 0, 0);
+    const auto & stolen_slot = lesser_node._slots[slot_idx];
+    const auto   stolen_key  = lesser_node._keys[key_idx];
+    if constexpr(Links)
+      lesser_node.remove<Links>(stolen_key, stolen_slot._child, key_idx);
+    else
+      lesser_node.remove<Links>(stolen_key, stolen_slot._payload, key_idx);
+
+    if constexpr(Links)
+      insert_hinted<Links>(stolen_key, stolen_slot._child, 0, 0);
+    else
+      insert_hinted<Links>(stolen_key, stolen_slot._payload, 0, 0);
 
     return stolen_key;
   }
@@ -357,8 +416,8 @@ struct ptr_wrap
 {
   T * _ptr;
 
-  bool operator==(const ptr_wrap rhs) const noexcept { return _ptr == rhs._ptr; }
-  bool operator!=(const ptr_wrap rhs) const noexcept { return _ptr != rhs._ptr; }
+  bool operator==(const ptr_wrap & rhs) const noexcept { return _ptr == rhs._ptr; }
+  bool operator!=(const ptr_wrap & rhs) const noexcept { return _ptr != rhs._ptr; }
 
   static inline ptr_wrap invalid() noexcept { return ptr_wrap{nullptr}; }
 };

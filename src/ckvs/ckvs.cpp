@@ -2,7 +2,6 @@
 
 #include <boost/predef.h>
 
-
 #if defined(CHECK_LEAKS)
 #define _CRTDBG_MAP_ALLOC
 #include <crtdbg.h>
