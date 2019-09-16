@@ -14,8 +14,7 @@
 #include "utils/common.hpp"
 #include "utils/backoff.hpp"
 
-
-//#define VERBOSE_INSPECT
+#define VERBOSE_INSPECT
 inline const char * dbg_kind(ckvs::detail::node_kind nk)
 {
   char * types[] = {"Removed", "Internal", "Root", "Leaf", "RootLeaf"};
@@ -26,11 +25,11 @@ template <typename T>
 inline const char * dbg_node(T & _locked)
 {
   static char contents_a[2][4096]{};
-  static bool ar_switch = false;
+  static bool ar_switch = false; // 2 dbg_node invokations per 1 printf!
   char *      contents  = contents_a[ar_switch];
   ar_switch             = !ar_switch;
   auto & node           = *_locked._node;
-  char * ptr            = contents + sprintf(contents, "#%u %s [ ", _locked._handle._id, dbg_kind(node._kind));
+  char * ptr            = contents + sprintf(contents, "%p %s [ ", _locked._handle._ptr, dbg_kind(node._kind));
   for(size_t i = 0; i < node._nKeys; ++i)
     ptr += sprintf(ptr, "%zu ", node._keys[i]);
   sprintf(ptr, "]");
@@ -42,8 +41,10 @@ namespace ckvs {
 template <typename KeyT,
           typename PayloadT,
           size_t Order,
-          template <typename> typename NodeHandleT = detail::ptr_wrap,
-          size_t MaxCapacity                       = std::numeric_limits<uint32_t>::max()>
+          template <typename> typename KeyHandleT     = detail::default_key_handle,
+          template <typename> typename PayloadHandleT = detail::default_payload_handle,
+          template <typename> typename NodeHandleT    = detail::default_node_handle,
+          size_t MaxCapacity                          = std::numeric_limits<uint32_t>::max()>
 struct bp_tree_config
 {
   static_assert(Order % 2 == 0, "split & merge currently support only even tree arity!");
@@ -51,9 +52,14 @@ struct bp_tree_config
 
   static constexpr size_t order = Order;
 
-  using key_t         = KeyT;
-  using payload_t     = PayloadT;
-  using node_t        = detail::node<bp_tree_config>;
+  using key_t     = KeyT;
+  using payload_t = PayloadT;
+
+  using node_t = detail::node<bp_tree_config>;
+
+  using key_handle_t     = KeyHandleT<bp_tree_config>;
+  using payload_handle_t = PayloadHandleT<bp_tree_config>;
+
   using node_handle_t = NodeHandleT<node_t>;
   using index_t       = utils::least_unsigned_t<order, uint8_t, uint16_t, uint32_t, uint64_t>;
 
@@ -71,20 +77,22 @@ template <typename Config, template <typename...> typename Extensions = detail::
 class bp_tree : public Extensions<Config>, public utils::noncopyable
 {
 public:
-  using config        = Config;
-  using index_t       = typename config::index_t;
-  using key_t         = typename config::key_t;
-  using payload_t     = typename config::payload_t;
-  using node_t        = typename config::node_t;
-  using node_handle_t = typename node_t::node_handle_t;
-  using slot_t        = typename node_t::slot_t;
+  using config           = Config;
+  using index_t          = typename config::index_t;
+  using key_t            = typename config::key_t;
+  using payload_t        = typename config::payload_t;
+  using key_handle_t     = typename config::key_handle_t;
+  using payload_handle_t = typename config::payload_handle_t;
+  using node_t           = typename config::node_t;
+  using node_handle_t    = typename config::node_handle_t;
+  using slot_t           = typename node_t::slot_t;
 
   using extensions = Extensions<Config>;
   using r_lock_t   = typename extensions::r_lock_t;
   using w_lock_t   = typename extensions::w_lock_t;
 
-  using r_locked_node_t = typename extensions::template select_locked_node_t<false>;
-  using w_locked_node_t = typename extensions::template select_locked_node_t<true>;
+  using r_locked_node_t = typename extensions::r_locked_node_t;
+  using w_locked_node_t = typename extensions::w_locked_node_t;
 
   using parents_trace_t = detail::parents_trace<r_locked_node_t, w_locked_node_t, config::upper_bound_leaf_level>;
   using root_to_leaf_path_t =
@@ -108,17 +116,19 @@ public:
   };
 
   template <detail::traverse_policy TraversePolicy,
+            typename KeyComparable,
             typename TraversePolicyTraits                = detail::traversal_policy_traits<TraversePolicy>,
             detail::traverse_policy BackupPolicy         = TraversePolicyTraits::policy_if_unsafe,
             bool                    LockLeafExclusive    = TraversePolicyTraits::lock_leaf_exclusive,
             bool                    LockNonLeafExclusive = TraversePolicyTraits::lock_non_leaf_exclusive,
             typename LeafLockT                           = std::conditional_t<LockLeafExclusive, w_lock_t, r_lock_t>>
-  auto traverse(const key_t key) noexcept
+  auto traverse(const KeyComparable key) noexcept
   {
     static_assert(!(!LockLeafExclusive && LockNonLeafExclusive), "weird policy, are you sure that's what you want?");
   start:
-    using non_leaf_locked_node_t     = select_locked_node_t<LockNonLeafExclusive>;
-    using leaf_locked_node_t         = select_locked_node_t<LockLeafExclusive>;
+    using non_leaf_locked_node_t = std::conditional_t<LockNonLeafExclusive, w_locked_node_t, r_locked_node_t>;
+    using leaf_locked_node_t     = std::conditional_t<LockLeafExclusive, w_locked_node_t, r_locked_node_t>;
+
     constexpr bool has_backup_policy = BackupPolicy != TraversePolicy;
 
     node_handle_t       node_handle = get_root();
@@ -139,7 +149,7 @@ public:
       }
       return node_is_safe;
     };
-    traverse_result<detail::locked_node_t<node_t, node_handle_t, LeafLockT>> result;
+    traverse_result<detail::locked_node<node_t, node_handle_t, LeafLockT>> result;
     for(;;)
     {
       non_leaf_locked_node_t locked_node = get_node<LockNonLeafExclusive>(node_handle);
@@ -193,7 +203,9 @@ public:
         {
           const bool node_is_rootLeaf = node.is_root();
           if(!node_is_rootLeaf && path._height == 0)
+          {
             goto start;
+          }
           result._leaf_handle = locked_node._handle;
           result._locked_leaf = std::move(locked_node);
           result._slot_idx    = leaf_idx;
@@ -208,7 +220,7 @@ public:
   void insert_in_parent(node_t &            node,
                         node_handle_t       locked_node_handle,
                         parents_trace_t     trace,
-                        const key_t         key,
+                        const key_handle_t  key,
                         const node_handle_t new_neighbor_handle) noexcept
   {
     if(node.is_root())
@@ -239,11 +251,17 @@ public:
     // We need to split the parent
     auto locked_new_parent = new_node(detail::node_kind::Internal);
 
-    const key_t sparse_key =
+    const auto [sparse_key_handle, remove_sparse_key_later] =
       parent.distribute_children(*locked_new_parent._node, parent.find_key_index(key), key, new_neighbor_handle);
 
     insert_in_parent(
-      parent, locked_parent._handle, trace.next_parent(parent.is_root()), sparse_key, locked_new_parent._handle);
+      parent, locked_parent._handle, trace.next_parent(parent.is_root()), sparse_key_handle, locked_new_parent._handle);
+
+    if(remove_sparse_key_later)
+    {
+      const index_t max_key_idx = parent._nKeys - 1;
+      parent.remove<true>(parent._keys[max_key_idx], parent._slots[parent._nKeys]._child, max_key_idx);
+    }
   }
 
   // Get left neighbor of a node, or right-one if the node is leftmost
@@ -262,16 +280,14 @@ public:
     // If a node has no neighbors, something is fatally wrong
     std::abort();
   }
-
   template <bool Links, typename ValueT = std::conditional_t<Links, node_handle_t, payload_t>>
-  void remove_entry(node_t &          node,
-                    w_locked_node_t & locked_node,
-                    node_handle_t     locked_node_handle,
-                    parents_trace_t   trace,
-                    const key_t       key,
-                    const ValueT &    value,
-                    const index_t     key_idx_hint) noexcept
+  void remove_entry(w_locked_node_t &  locked_node,
+                    parents_trace_t    trace,
+                    const key_handle_t key,
+                    const ValueT &     value,
+                    const index_t      key_idx_hint) noexcept
   {
+    node_t & node = *locked_node._node;
     node.remove<Links>(key, value, key_idx_hint);
 
     mark_dirty(locked_node);
@@ -283,18 +299,18 @@ public:
     auto     locked_parent = std::move(std::get<w_locked_node_t>(trace.current_parent()));
     node_t & parent        = *locked_parent._node;
     CKVS_ASSERT(parent.has_links());
-    auto [neighbor_handle, parent_idx] = get_neighbor(locked_node_handle, parent);
+    auto [neighbor_handle, parent_idx] = get_neighbor(locked_node._handle, parent);
     CKVS_ASSERT(neighbor_handle != node_handle_t::invalid());
     auto     locked_neighbor = get_node<true>(neighbor_handle);
     node_t & neighbor        = *locked_neighbor._node;
     mark_dirty(locked_neighbor);
 
     CKVS_ASSERT(neighbor._kind == node._kind);
-    const bool node_is_leftmost = parent._slots[0]._child == locked_node_handle;
+    const bool node_is_leftmost = parent._slots[0]._child == locked_node._handle;
 
     // parent_idx must be the key between node and neighbor
     parent_idx -= node_is_leftmost;
-    const key_t parent_key = parent._keys[parent_idx];
+    const key_handle_t parent_key{&parent, parent_idx};
 
     if(node.can_coalesce_with(neighbor))
     {
@@ -305,7 +321,6 @@ public:
       if(node_is_leftmost)
       {
         std::swap(node_p, neighbor_p);
-        std::swap(locked_node_handle, neighbor_handle);
         std::swap(locked_node._handle, locked_neighbor._handle);
       }
 
@@ -316,21 +331,16 @@ public:
       if(parent.is_root() && parent.has_links() && parent._nKeys == 1)
       {
         mark_dirty(locked_parent);
-        parent.remove<true>(parent_key, locked_node_handle, parent_idx);
+        parent.remove<true>(parent_key, locked_node._handle, parent_idx);
         neighbor_p->_kind = node.has_links() ? detail::node_kind::Root : detail::node_kind::RootLeaf;
         parent._kind      = detail::node_kind::Removed;
         delete_node(locked_parent);
-        update_root(neighbor_handle);
+        update_root(locked_neighbor._handle);
       }
       else
       {
-        remove_entry<true>(parent,
-                           locked_parent,
-                           locked_parent._handle,
-                           trace.next_parent(parent.is_root()),
-                           parent_key,
-                           locked_node_handle,
-                           parent_idx);
+        remove_entry<true>(
+          locked_parent, trace.next_parent(parent.is_root()), parent_key, locked_node._handle, parent_idx);
       }
       node_p->_kind = detail::node_kind::Removed;
       delete_node(locked_node);
@@ -338,18 +348,29 @@ public:
     }
 
     // Can't coalesce => steal KV-pair from the neighbor
-    const auto new_sparse_key =
+    const key_handle_t new_sparse_key =
       node_is_leftmost ? node.steal_smallest<Links>(neighbor) : node.steal_greatest<Links>(neighbor);
 
-    // Use parents' sparse key
+    // Exchange node's sparse_key with parent's key
     if constexpr(Links)
-      node._keys[node_is_leftmost ? node._nKeys - 1 : 0] = parent_key;
+    {
+      const index_t key_idx_to_replace = node_is_leftmost ? node._nKeys - 1 : 0;
+      // The key we're about to replace is the new_sparse_key, so we must first insert the parent_key
+      // in the node, insert new_sparse_key in parent, and only then remove new_sparse_key from the node.
+      // Otherwise, new_sparse_key handle will dangle.
+      CKVS_ASSERT((new_sparse_key == key_handle_t{&node, key_idx_to_replace}));
+      CKVS_ASSERT(node.safe_for_insert());
+      node.insert_hinted<true>(
+        parent_key, node._slots[key_idx_to_replace]._child, key_idx_to_replace + 1, key_idx_to_replace + 1);
+      parent._keys[parent_idx] = new_sparse_key;
+      node.remove<true>(node._keys[key_idx_to_replace], node._slots[key_idx_to_replace]._child, key_idx_to_replace);
+    }
+    else
+      parent._keys[parent_idx] = new_sparse_key;
+
+    mark_dirty(locked_parent);
 
     CKVS_ASSERT(node._nKeys > 0);
-
-    // And finally update the parent sparse key
-    parent._keys[parent_idx] = new_sparse_key;
-    mark_dirty(locked_parent);
     CKVS_ASSERT(neighbor.has_enough_slots());
     CKVS_ASSERT(parent.has_enough_slots());
     CKVS_ASSERT(node.has_enough_slots());
@@ -453,7 +474,8 @@ public:
   {
   }
 
-  void insert(const key_t key, const payload_t payload) noexcept
+  template <typename KeyConverable, typename PayloadConvertable>
+  void insert(const KeyConverable key, const PayloadConvertable payload) noexcept
   {
     auto traverse_result = traverse<detail::traverse_policy::insert>(key);
 
@@ -473,9 +495,9 @@ public:
     node.distribute_payload(new_neighbor, traverse_result._slot_idx, key, payload);
     mark_dirty(locked_new_neighbor);
 
-    new_neighbor._slots[node_max_keys]._payload = node._slots[node_max_keys]._payload;
-    node._slots[node_max_keys]                  = locked_new_neighbor._handle;
-    const key_t sparse_key                      = new_neighbor._keys[0];
+    new_neighbor._slots[node_max_keys]._child = node._slots[node_max_keys]._child;
+    node._slots[node_max_keys]                = locked_new_neighbor._handle;
+    const key_handle_t sparse_key{&new_neighbor, 0};
 
     if(node.is_root() && !node.has_links())
     {
@@ -508,22 +530,20 @@ public:
       return;
     }
 
-    remove_entry<false>(*traverse_result._locked_leaf._node,
-                        traverse_result._locked_leaf,
-                        traverse_result._leaf_handle,
+    remove_entry<false>(traverse_result._locked_leaf,
                         parents_trace_t::trace_from_path(traverse_result._path),
-                        key,
+                        key_handle_t{&node, traverse_result._slot_idx},
                         node._slots[traverse_result._slot_idx]._payload,
                         traverse_result._slot_idx);
   }
 
-  std::optional<payload_t> find(const key_t key) noexcept
+  template <typename KeyComparable, typename Visitor>
+  void visit(const KeyComparable key, Visitor func) noexcept
   {
-    auto     traverse_result = traverse<detail::traverse_policy::search>(key);
-    node_t & node            = *traverse_result._locked_leaf._node;
-    return node._nKeys != traverse_result._slot_idx && key == node._keys[traverse_result._slot_idx] ?
-             std::optional<payload_t>{node._slots[traverse_result._slot_idx]._payload} :
-             std::nullopt;
+    auto       traverse_result = traverse<detail::traverse_policy::search>(key);
+    node_t &   node            = *traverse_result._locked_leaf._node;
+    const bool found = node._nKeys != traverse_result._slot_idx && key == node._keys[traverse_result._slot_idx];
+    func(found ? &node._slots[traverse_result._slot_idx]._payload : nullptr);
   }
 };
 

@@ -149,7 +149,6 @@ Leaf/Root/...,
 - If a key's type != Binary -> stored inline
 - If a payload's type != Binary && doesn't have expiration -> stored inline
 - If a key/payload isn't stored inline, the highest bit indicates whether the value is Huge
-  and the second highest bit indicates whether the value is overflown
   - If  Huge -> first 4 bytes is overflow_page_id, then 2 bytes for size in # of pages
   - If !Huge -> first 2 bytes is slot_id. next 4 bytes is PageId if overflown, or unused
 - If payload has expiration, the first 4 bytes of its slot value is a timestamp.

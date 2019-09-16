@@ -5,9 +5,11 @@
 #if defined(CHECK_LEAKS)
 #define _CRTDBG_MAP_ALLOC
 #include <crtdbg.h>
+
 void * operator new(size_t n)
 {
   void * ptr = _malloc_dbg(n, _NORMAL_BLOCK, "", 0);
+
   if(ptr)
     return ptr;
   else

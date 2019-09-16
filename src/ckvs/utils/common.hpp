@@ -10,10 +10,12 @@
 #include <llfio/v2.0/config.hpp>
 #include <llfio/v2.0/quickcpplib/include/span.hpp>
 
+#include "constants.hpp"
+
 template <typename T>
 struct show_type
 {
-  show_type() { static_assert(sizeof(T) > 2000000); }
+  show_type() { static_assert(sizeof(T) == 0); }
 };
 
 namespace ckvs { namespace utils {
@@ -83,6 +85,8 @@ double quick_profile(Func && f, bool one_shot = true, double runtime_in_seconds 
   return runtime / run_count;
 }
 
+}}
+
 constexpr uint64_t operator"" _magic_sig(const char * s, size_t len)
 {
   uint64_t result = 0;
@@ -90,8 +94,6 @@ constexpr uint64_t operator"" _magic_sig(const char * s, size_t len)
     result |= static_cast<uint64_t>(s[i]) << (8 * i);
   return result;
 }
-
-}}
 
 #if defined(ASSERTS)
 #define CKVS_ASSERT(cond)                                                                                              \

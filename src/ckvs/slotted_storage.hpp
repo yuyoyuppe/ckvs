@@ -4,6 +4,8 @@
 #include <type_traits>
 #include <algorithm>
 
+#include "utils/common.hpp"
+
 namespace ckvs {
 
 template <uint16_t size>
@@ -108,25 +110,25 @@ public:
     return {const_cast<char *>(mut_span.data()), mut_span.size()};
   }
 
-  bool has_space_for(const span_t slot_value) const noexcept
+  bool has_space_for(const span_t slot_value, const uint16_t offset = 0) const noexcept
   {
-    const size_t value_size = slot_value.size();
+    const size_t value_size = slot_value.size() + offset;
     const size_t desc_size  = sizeof(slot_description_t);
     if(value_size >= std::numeric_limits<uint16_t>::max() - desc_size)
       return false;
     return static_cast<uint16_t>(value_size) + desc_size <= free_space();
   }
 
-  uint16_t add_slot(const span_t slot_value) noexcept
+  uint16_t add_slot(const span_t slot_value, const uint16_t offset = 0) noexcept
   {
-    CKVS_ASSERT(has_space_for(slot_value));
+    CKVS_ASSERT(has_space_for(slot_value, offset));
     CKVS_ASSERT(slot_value.size());
 
     auto [desc, slot_id]      = acquire_new_slot();
-    const uint16_t value_size = static_cast<uint16_t>(slot_value.size());
+    const uint16_t value_size = offset + static_cast<uint16_t>(slot_value.size());
     desc->_size               = value_size;
     desc->_offset             = _slot_values_end_offset += value_size;
-    std::copy(slot_value.begin(), slot_value.end(), slot_ptr(*desc));
+    std::copy(slot_value.begin() + offset, slot_value.end(), slot_ptr(*desc));
     return slot_id;
   }
 
